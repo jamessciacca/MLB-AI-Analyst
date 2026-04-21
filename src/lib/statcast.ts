@@ -286,6 +286,7 @@ function buildStatcastSearchUrl(
   startDate: string,
   endDate: string,
   season = currentSeason(),
+  opponentId?: number,
 ): string {
   const params = new URLSearchParams({
     all: "true",
@@ -331,12 +332,18 @@ function buildStatcastSearchUrl(
 
   params.set(playerType === "pitcher" ? "pitchers_lookup[]" : "batters_lookup[]", String(playerId));
 
+  if (opponentId) {
+    params.set(playerType === "pitcher" ? "batters_lookup[]" : "pitchers_lookup[]", String(opponentId));
+  }
+
   return `https://baseballsavant.mlb.com/statcast_search/csv?${params.toString()}`;
 }
 
 function mapStatcastEventRow(row: CsvRow): StatcastEventRow {
   return {
     gameDate: asString(row.game_date) ?? "",
+    batterId: asNumber(row.batter),
+    pitcherId: asNumber(row.pitcher),
     pitchType: asString(row.pitch_type),
     pitchName: asString(row.pitch_name),
     playerName: asString(row.player_name),
@@ -357,9 +364,10 @@ async function getStatcastSearchRows(
   playerId: number,
   endDate: string,
   season = currentSeason(),
+  opponentId?: number,
 ): Promise<StatcastEventRow[]> {
   const startDate = `${season}-03-01`;
-  const url = buildStatcastSearchUrl(playerType, playerId, startDate, endDate, season);
+  const url = buildStatcastSearchUrl(playerType, playerId, startDate, endDate, season, opponentId);
   const rows = await fetchCsvRows(url);
 
   return rows
@@ -381,4 +389,30 @@ export async function getPitcherStatcastRows(
   season = currentSeason(),
 ): Promise<StatcastEventRow[]> {
   return getStatcastSearchRows("pitcher", playerId, endDate, season);
+}
+
+export async function getBatterVsPitcherRows(
+  batterId: number,
+  pitcherId: number,
+  referenceDate: string,
+  season = currentSeason(),
+): Promise<StatcastEventRow[]> {
+  const priorSeason = season - 1;
+  const seasons = [season, priorSeason];
+  const rows = await Promise.all(
+    seasons.map((targetSeason) =>
+      getStatcastSearchRows(
+        "batter",
+        batterId,
+        targetSeason === season ? referenceDate : `${targetSeason}-11-30`,
+        targetSeason,
+        pitcherId,
+      ),
+    ),
+  );
+
+  return rows
+    .flat()
+    .filter((row) => row.pitcherId === pitcherId && row.gameDate < referenceDate)
+    .sort((left, right) => right.gameDate.localeCompare(left.gameDate));
 }

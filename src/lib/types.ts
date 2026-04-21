@@ -2,6 +2,7 @@ export type ImpactLabel = "positive" | "negative" | "neutral";
 export type ConfidenceLevel = "low" | "medium" | "high";
 export type Recommendation = "good play" | "neutral" | "avoid";
 export type AnalysisMarket = "hit" | "home_run";
+export type WeatherCondition = "sunny" | "cloudy" | "rainy" | "unknown";
 
 export interface TeamDirectoryEntry {
   id: number;
@@ -45,11 +46,14 @@ export interface GameSummary {
   homeProbablePitcher: {
     id: number;
     fullName: string;
+    pitchHand: string | null;
   } | null;
   awayProbablePitcher: {
     id: number;
     fullName: string;
+    pitchHand: string | null;
   } | null;
+  weather?: WeatherSnapshot | null;
 }
 
 export interface HittingStatLine {
@@ -118,6 +122,8 @@ export interface PitchMixEntry {
 
 export interface StatcastEventRow {
   gameDate: string;
+  batterId: number | null;
+  pitcherId: number | null;
   pitchType: string | null;
   pitchName: string | null;
   playerName: string | null;
@@ -163,6 +169,8 @@ export interface VenueSnapshot {
 
 export interface WeatherSnapshot {
   forecastTime: string;
+  condition: WeatherCondition;
+  cloudCover: number | null;
   temperatureF: number | null;
   apparentTemperatureF: number | null;
   precipitationProbability: number | null;
@@ -224,6 +232,38 @@ export interface AnalysisResult {
   diagnostics: AnalysisDiagnostics;
   summary: string;
   aiSummary: string | null;
+  previousModelResult?: PreviousModelResult | null;
+  batterVsPitcher: BatterVsPitcherSummary | null;
+}
+
+export interface BatterVsPitcherSummary {
+  batterId: number;
+  pitcherId: number;
+  pitcherName: string;
+  plateAppearances: number;
+  atBats: number;
+  hits: number;
+  homeRuns: number;
+  strikeouts: number;
+  walks: number;
+  battingAverage: number | null;
+  lastFacedDate: string | null;
+  summary: string;
+}
+
+export interface PreviousModelResult {
+  date: string;
+  market: AnalysisMarket;
+  marketLabel: string;
+  game: GameSummary | null;
+  probability: number | null;
+  recommendation: Recommendation | null;
+  rating: "correct" | "too_high" | "too_low" | "pending" | "no_game" | "no_boxscore";
+  actualHits: number | null;
+  actualHomeRuns: number | null;
+  actualAtBats: number | null;
+  outcomeSuccess: boolean | null;
+  message: string;
 }
 
 export interface StartingLineupPlayer {

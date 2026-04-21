@@ -1,5 +1,5 @@
 import { remember } from "@/lib/cache";
-import { type VenueSnapshot, type WeatherSnapshot } from "@/lib/types";
+import { type VenueSnapshot, type WeatherCondition, type WeatherSnapshot } from "@/lib/types";
 import { asNumber } from "@/lib/utils";
 
 const WEATHER_TTL_MS = 20 * 60 * 1000;
@@ -12,6 +12,8 @@ type WeatherApiResponse = {
     relative_humidity_2m?: number[];
     precipitation_probability?: number[];
     wind_speed_10m?: number[];
+    cloud_cover?: number[];
+    weather_code?: number[];
   };
 };
 
@@ -21,6 +23,44 @@ function celsiusToFahrenheit(value: number | null): number | null {
 
 function kmhToMph(value: number | null): number | null {
   return value === null ? null : value * 0.621371;
+}
+
+function classifyWeather(
+  weatherCode: number | null,
+  precipitationProbability: number | null,
+  cloudCover: number | null,
+): WeatherCondition {
+  if (
+    precipitationProbability !== null &&
+    precipitationProbability >= 45
+  ) {
+    return "rainy";
+  }
+
+  if (
+    weatherCode !== null &&
+    ((weatherCode >= 51 && weatherCode <= 67) ||
+      (weatherCode >= 80 && weatherCode <= 99))
+  ) {
+    return "rainy";
+  }
+
+  if (
+    weatherCode !== null &&
+    (weatherCode === 45 || weatherCode === 48 || weatherCode === 2 || weatherCode === 3)
+  ) {
+    return "cloudy";
+  }
+
+  if (cloudCover !== null && cloudCover >= 55) {
+    return "cloudy";
+  }
+
+  if (weatherCode === 0 || weatherCode === 1 || cloudCover !== null) {
+    return "sunny";
+  }
+
+  return "unknown";
 }
 
 export async function getGameWeather(
@@ -36,9 +76,9 @@ export async function getGameWeather(
   url.searchParams.set("longitude", String(venue.longitude));
   url.searchParams.set(
     "hourly",
-    "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,wind_speed_10m",
+    "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,wind_speed_10m,cloud_cover,weather_code",
   );
-  url.searchParams.set("forecast_days", "3");
+  url.searchParams.set("forecast_days", "7");
   url.searchParams.set("timezone", "auto");
 
   const weather = await remember(url.toString(), WEATHER_TTL_MS, async () => {
@@ -71,15 +111,21 @@ export async function getGameWeather(
     }
   });
 
+  const precipitationProbability = asNumber(
+    hourly.precipitation_probability?.[bestIndex],
+  );
+  const cloudCover = asNumber(hourly.cloud_cover?.[bestIndex]);
+  const weatherCode = asNumber(hourly.weather_code?.[bestIndex]);
+
   return {
     forecastTime: hourly.time[bestIndex] ?? gameDate,
+    condition: classifyWeather(weatherCode, precipitationProbability, cloudCover),
+    cloudCover,
     temperatureF: celsiusToFahrenheit(asNumber(hourly.temperature_2m?.[bestIndex])),
     apparentTemperatureF: celsiusToFahrenheit(
       asNumber(hourly.apparent_temperature?.[bestIndex]),
     ),
-    precipitationProbability: asNumber(
-      hourly.precipitation_probability?.[bestIndex],
-    ),
+    precipitationProbability,
     windSpeedMph: kmhToMph(asNumber(hourly.wind_speed_10m?.[bestIndex])),
     humidity: asNumber(hourly.relative_humidity_2m?.[bestIndex]),
   };

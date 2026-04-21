@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { buildLineupComparison } from "@/lib/analyzer";
+import { appendPredictions } from "@/lib/feedback";
+import { runDailyOutcomeAuditIfDue } from "@/lib/outcome-audit";
 
 export const runtime = "nodejs";
 
@@ -13,7 +15,9 @@ const requestSchema = z.object({
 export async function POST(request: Request) {
   try {
     const body = requestSchema.parse(await request.json());
+    await runDailyOutcomeAuditIfDue();
     const comparison = await buildLineupComparison(body.gamePk, body.market);
+    await appendPredictions(comparison.players);
 
     return NextResponse.json(comparison);
   } catch (error) {

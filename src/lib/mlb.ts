@@ -13,6 +13,7 @@ import { asNumber, asString, normalizeSearch, todayIsoDate } from "@/lib/utils";
 
 const MLB_BASE_URL = "https://statsapi.mlb.com/api/v1";
 const MLB_FEED_BASE_URL = "https://statsapi.mlb.com/api/v1.1";
+const LIVE_GAME_TTL_MS = 5 * 1000;
 const HALF_HOUR_MS = 30 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -130,6 +131,68 @@ function mapPlayer(
   };
 }
 
+function mapProbablePitcher(
+  probablePitcher: unknown,
+): GameSummary["homeProbablePitcher"] {
+  if (!probablePitcher) {
+    return null;
+  }
+
+  const pitcher = probablePitcher as Record<string, unknown>;
+
+  return {
+    id: asNumber(pitcher.id) ?? 0,
+    fullName: asString(pitcher.fullName) ?? "TBD",
+    pitchHand:
+      asString((pitcher.pitchHand as Record<string, unknown> | undefined)?.code) ??
+      null,
+  };
+}
+
+async function getPlayerPitchHand(playerId: number): Promise<string | null> {
+  if (!playerId) {
+    return null;
+  }
+
+  const json = await mlbJson<{ people?: Record<string, unknown>[] }>(
+    `people/${playerId}`,
+    undefined,
+    HALF_HOUR_MS,
+  );
+  const person = json.people?.[0];
+
+  return (
+    asString((person?.pitchHand as Record<string, unknown> | undefined)?.code) ??
+    null
+  );
+}
+
+async function enrichProbablePitcherHand(
+  pitcher: GameSummary["homeProbablePitcher"],
+): Promise<GameSummary["homeProbablePitcher"]> {
+  if (!pitcher || pitcher.pitchHand) {
+    return pitcher;
+  }
+
+  return {
+    ...pitcher,
+    pitchHand: await getPlayerPitchHand(pitcher.id),
+  };
+}
+
+async function enrichGamePitcherHands(game: GameSummary): Promise<GameSummary> {
+  const [homeProbablePitcher, awayProbablePitcher] = await Promise.all([
+    enrichProbablePitcherHand(game.homeProbablePitcher),
+    enrichProbablePitcherHand(game.awayProbablePitcher),
+  ]);
+
+  return {
+    ...game,
+    homeProbablePitcher,
+    awayProbablePitcher,
+  };
+}
+
 async function getCurrentBatters(
   season = currentSeason(),
 ): Promise<PlayerSearchResult[]> {
@@ -236,7 +299,7 @@ export async function getGamesByDate(
 
   const games = json.dates?.flatMap((date) => date.games ?? []) ?? [];
 
-  return games.map((game) => {
+  const summaries = games.map((game) => {
     const homeTeamId = asNumber(
       (
         (game.teams as Record<string, unknown> | undefined)?.home as
@@ -294,32 +357,12 @@ export async function getGamesByDate(
         name: awayTeam?.name ?? "Unknown Team",
         abbreviation: awayTeam?.abbreviation ?? "UNK",
       },
-      homeProbablePitcher: homeData?.probablePitcher
-        ? {
-            id:
-              asNumber(
-                (homeData.probablePitcher as Record<string, unknown>).id,
-              ) ?? 0,
-            fullName:
-              asString(
-                (homeData.probablePitcher as Record<string, unknown>).fullName,
-              ) ?? "TBD",
-          }
-        : null,
-      awayProbablePitcher: awayData?.probablePitcher
-        ? {
-            id:
-              asNumber(
-                (awayData.probablePitcher as Record<string, unknown>).id,
-              ) ?? 0,
-            fullName:
-              asString(
-                (awayData.probablePitcher as Record<string, unknown>).fullName,
-              ) ?? "TBD",
-          }
-        : null,
+      homeProbablePitcher: mapProbablePitcher(homeData?.probablePitcher),
+      awayProbablePitcher: mapProbablePitcher(awayData?.probablePitcher),
     };
   });
+
+  return Promise.all(summaries.map((game) => enrichGamePitcherHands(game)));
 }
 
 export async function getGameByPk(
@@ -328,6 +371,69 @@ export async function getGameByPk(
 ): Promise<GameSummary | null> {
   const games = await getGamesFromGamePk(gamePk, season);
   return games[0] ?? null;
+}
+
+export async function getPlayerGameBattingLine(
+  gamePk: number,
+  playerId: number,
+): Promise<{ hits: number; homeRuns: number; atBats: number } | null> {
+  const json = await mlbFeedJson<Record<string, unknown>>(
+    `game/${gamePk}/feed/live`,
+    LIVE_GAME_TTL_MS,
+  );
+  const teams = (
+    ((json.liveData as Record<string, unknown> | undefined)?.boxscore as
+      | Record<string, unknown>
+      | undefined)?.teams as Record<string, unknown> | undefined
+  ) ?? { home: {}, away: {} };
+  const homePlayers = (teams.home as Record<string, unknown> | undefined)?.players as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const awayPlayers = (teams.away as Record<string, unknown> | undefined)?.players as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const players = {
+    ...(homePlayers ?? {}),
+    ...(awayPlayers ?? {}),
+  };
+  const player =
+    players[`ID${playerId}`] ??
+    Object.values(players).find(
+      (entry) => asNumber((entry.person as Record<string, unknown> | undefined)?.id) === playerId,
+    );
+  const batting = player?.stats
+    ? ((player.stats as Record<string, unknown>).batting as Record<string, unknown> | undefined)
+    : undefined;
+
+  if (!batting) {
+    return null;
+  }
+
+  return {
+    hits: asNumber(batting.hits) ?? 0,
+    homeRuns: asNumber(batting.homeRuns) ?? 0,
+    atBats: asNumber(batting.atBats) ?? 0,
+  };
+}
+
+export async function getLiveGameStatus(gamePk: number): Promise<string | null> {
+  const json = await mlbFeedJson<Record<string, unknown>>(
+    `game/${gamePk}/feed/live`,
+    LIVE_GAME_TTL_MS,
+  );
+
+  return (
+    asString(
+      ((json.gameData as Record<string, unknown> | undefined)?.status as
+        | Record<string, unknown>
+        | undefined)?.detailedState,
+    ) ??
+    asString(
+      ((json.gameData as Record<string, unknown> | undefined)?.status as
+        | Record<string, unknown>
+        | undefined)?.abstractGameState,
+    )
+  );
 }
 
 async function getGamesFromGamePk(
@@ -348,7 +454,7 @@ async function getGamesFromGamePk(
   ]);
 
   const games = json.dates?.flatMap((date) => date.games ?? []) ?? [];
-  return games.map((game) => {
+  const summaries = games.map((game) => {
     const homeTeamId = asNumber(
       (((game.teams as Record<string, unknown>).home as Record<string, unknown>).team as Record<
         string,
@@ -395,32 +501,12 @@ async function getGamesFromGamePk(
         name: teamDirectory.get(awayTeamId)?.name ?? "Unknown Team",
         abbreviation: teamDirectory.get(awayTeamId)?.abbreviation ?? "UNK",
       },
-      homeProbablePitcher: homeData.probablePitcher
-        ? {
-            id:
-              asNumber(
-                (homeData.probablePitcher as Record<string, unknown>).id,
-              ) ?? 0,
-            fullName:
-              asString(
-                (homeData.probablePitcher as Record<string, unknown>).fullName,
-              ) ?? "TBD",
-          }
-        : null,
-      awayProbablePitcher: awayData.probablePitcher
-        ? {
-            id:
-              asNumber(
-                (awayData.probablePitcher as Record<string, unknown>).id,
-              ) ?? 0,
-            fullName:
-              asString(
-                (awayData.probablePitcher as Record<string, unknown>).fullName,
-              ) ?? "TBD",
-          }
-        : null,
+      homeProbablePitcher: mapProbablePitcher(homeData.probablePitcher),
+      awayProbablePitcher: mapProbablePitcher(awayData.probablePitcher),
     };
   });
+
+  return Promise.all(summaries.map((game) => enrichGamePitcherHands(game)));
 }
 
 function parseHittingStatLine(stat: Record<string, unknown>): HittingStatLine {

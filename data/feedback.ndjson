@@ -1,1 +1,7 @@
 
+{"analysisId":"665489-824046-1776745336579","playerId":665489,"gamePk":824046,"market":"hit","probability":0.7736870921775347,"recommendation":"good play","rating":"correct","notes":"","proofImage":null,"savedAt":"2026-04-21T04:22:23.870Z"}
+{"analysisId":"669127-823149-1776745362015","playerId":669127,"gamePk":823149,"market":"hit","probability":0.7288368833767438,"recommendation":"good play","rating":"correct","notes":"","proofImage":null,"savedAt":"2026-04-21T04:22:45.668Z"}
+{"analysisId":"694208-824692-1776745383836","playerId":694208,"gamePk":824692,"market":"hit","probability":0.7930977881967561,"recommendation":"good play","rating":"correct","notes":"","proofImage":null,"savedAt":"2026-04-21T04:23:05.946Z"}
+{"analysisId":"669743-824370-1776745406022","playerId":669743,"gamePk":824370,"market":"hit","probability":0.8875915450952996,"recommendation":"good play","rating":"correct","notes":"","proofImage":null,"savedAt":"2026-04-21T04:23:27.977Z"}
+{"analysisId":"677951-824125-1776745471187","playerId":677951,"gamePk":824125,"market":"hit","probability":0.7711938540596435,"recommendation":"good play","rating":"correct","notes":"","proofImage":null,"savedAt":"2026-04-21T04:24:33.131Z"}
+{"analysisId":"687221-824370-1776745516522","playerId":687221,"gamePk":824370,"market":"home_run","probability":0.507691210460451,"recommendation":"good play","rating":"correct","notes":"The model got rushing correct, he hit two homeruns!","proofImage":null,"savedAt":"2026-04-21T04:25:34.356Z"}

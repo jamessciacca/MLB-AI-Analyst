@@ -419,6 +419,7 @@ function isoToHomeRunRate(iso: number | null | undefined): number | null {
 export function scoreOutcomeChance(
   input: AnalysisModelInput,
   market: AnalysisMarket,
+  feedbackCalibration = 0,
 ): Omit<AnalysisResult, "analysisId" | "generatedAt" | "aiSummary"> {
   const outcomeEvents = market === "home_run" ? HOME_RUN_EVENTS : HIT_EVENTS;
   const marketLabel = getMarketLabel(market);
@@ -617,7 +618,8 @@ export function scoreOutcomeChance(
       pitchMixAdjustment +
       defenseAdjustment +
       parkAdjustment +
-      weatherAdjustment,
+      weatherAdjustment +
+      feedbackCalibration,
     market === "home_run" ? 0.005 : 0.1,
     market === "home_run" ? 0.2 : 0.45,
   );
@@ -755,6 +757,16 @@ export function scoreOutcomeChance(
     },
   ];
 
+  if (feedbackCalibration !== 0) {
+    factors.push({
+      label: "Feedback calibration",
+      value: `${feedbackCalibration >= 0 ? "+" : ""}${formatDecimal(feedbackCalibration)}`,
+      impact: impactLabel(feedbackCalibration),
+      detail:
+        "Recent saved feedback adjusted this market slightly. This includes slips or notes marked as right, too optimistic, or too pessimistic.",
+    });
+  }
+
   const notes: string[] = [];
 
   if (!input.pitcher.probable) {
@@ -781,6 +793,9 @@ export function scoreOutcomeChance(
   }
   if (input.hitter.lineupSlot) {
     notes.push(`Expected at-bats were adjusted using the live lineup slot (${input.hitter.lineupSlot}).`);
+  }
+  if (feedbackCalibration !== 0) {
+    notes.push("Saved feedback has started calibrating this market.");
   }
 
   return {
@@ -819,6 +834,7 @@ export function scoreOutcomeChance(
     factors,
     notes,
     diagnostics,
+    batterVsPitcher: null,
     summary: `${input.hitter.player.fullName} projects for a ${formatPercent(
       atLeastOne,
     )} chance of at least one ${market === "home_run" ? "home run" : "hit"}, built from a ${formatPercent(

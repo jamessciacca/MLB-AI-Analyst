@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { generateAiSummary } from "@/lib/ai";
-import { buildAnalysis } from "@/lib/analyzer";
+import { buildAnalysis, buildPreviousModelResult } from "@/lib/analyzer";
+import { appendPrediction } from "@/lib/feedback";
+import { runDailyOutcomeAuditIfDue } from "@/lib/outcome-audit";
 
 export const runtime = "nodejs";
 
@@ -15,11 +17,17 @@ const requestSchema = z.object({
 export async function POST(request: Request) {
   try {
     const body = requestSchema.parse(await request.json());
+    await runDailyOutcomeAuditIfDue();
     const analysis = await buildAnalysis(body.playerId, body.gamePk, body.market);
-    const aiSummary = await generateAiSummary(analysis);
+    const [previousModelResult, aiSummary] = await Promise.all([
+      buildPreviousModelResult(body.playerId, body.gamePk, body.market),
+      generateAiSummary(analysis),
+    ]);
+    await appendPrediction(analysis);
 
     return NextResponse.json({
       ...analysis,
+      previousModelResult,
       aiSummary,
     });
   } catch (error) {
