@@ -4,6 +4,7 @@ import { z } from "zod";
 import { generateAiSummary } from "@/lib/ai";
 import { buildAnalysis, buildPreviousModelResult } from "@/lib/analyzer";
 import { appendPrediction } from "@/lib/feedback";
+import { getDraftKingsPlayerOdds } from "@/lib/odds";
 import { runDailyOutcomeAuditIfDue } from "@/lib/outcome-audit";
 
 export const runtime = "nodejs";
@@ -19,9 +20,10 @@ export async function POST(request: Request) {
     const body = requestSchema.parse(await request.json());
     await runDailyOutcomeAuditIfDue();
     const analysis = await buildAnalysis(body.playerId, body.gamePk, body.market);
-    const [previousModelResult, aiSummary] = await Promise.all([
+    const [previousModelResult, aiSummary, odds] = await Promise.all([
       buildPreviousModelResult(body.playerId, body.gamePk, body.market),
       generateAiSummary(analysis),
+      getDraftKingsPlayerOdds(analysis),
     ]);
     await appendPrediction(analysis);
 
@@ -29,6 +31,7 @@ export async function POST(request: Request) {
       ...analysis,
       previousModelResult,
       aiSummary,
+      odds,
     });
   } catch (error) {
     const message =

@@ -9,9 +9,9 @@ import {
   type Recommendation,
   type StatcastEventRow,
 } from "@/lib/types";
+import { predictHitWithMl } from "@/lib/ml-hit-predictor";
 import { average, clamp, formatDecimal, formatPercent, minusDays } from "@/lib/utils";
 
-const MODEL_VERSION = "v1.1.0";
 const LEAGUE_HIT_RATE = 0.245;
 const LEAGUE_HOME_RUN_RATE = 0.033;
 const LEAGUE_HARD_HIT_RATE = 0.39;
@@ -19,6 +19,62 @@ const LEAGUE_BARREL_LIKE_RATE = 0.07;
 const LEAGUE_POWER_ISO = 0.17;
 const LEAGUE_SPRINT_SPEED = 27.0;
 const LEAGUE_STRIKEOUT_RATE = 0.22;
+const LEAGUE_TEAM_OBP = 0.318;
+
+const HIT_PROBABILITY_MODEL_CONFIG = {
+  version: "v2.0.0",
+  leagueHitRate: LEAGUE_HIT_RATE,
+  minPerOpportunity: 0.1,
+  maxPerOpportunity: 0.45,
+  shrinkage: {
+    hitterSeasonAtBats: 260,
+    expectedStatsPlateAppearances: 220,
+    handSplitAtBats: 90,
+    pitcherBattersFaced: 300,
+    pitcherStatcastAtBats: 130,
+    recentAtBats: 28,
+  },
+  baselineWeights: {
+    seasonAverage: 0.32,
+    expectedAverage: 0.34,
+    obpSkill: 0.09,
+    slugSkill: 0.07,
+    statcastOutcome: 0.12,
+    hardHit: 0.06,
+  },
+  adjustmentScales: {
+    platoon: 0.34,
+    pitcherAverage: 0.58,
+    pitcherWhip: 0.018,
+    pitcherStrikeout: -0.05,
+    pitcherHardHit: 0.055,
+    bullpenDefenseProxy: 0.75,
+    recentForm: 0.1,
+    recentConsistency: 0.025,
+    teamObp: 0.12,
+    homeField: 0.004,
+  },
+  caps: {
+    platoon: 0.03,
+    pitcher: 0.055,
+    bullpen: 0.018,
+    recent: 0.028,
+    opportunityTeam: 0.18,
+  },
+  lineupPlateAppearances: {
+    1: 4.72,
+    2: 4.63,
+    3: 4.54,
+    4: 4.45,
+    5: 4.34,
+    6: 4.22,
+    7: 4.1,
+    8: 3.98,
+    9: 3.86,
+  } as Record<number, number>,
+};
+
+const MODEL_VERSION = HIT_PROBABILITY_MODEL_CONFIG.version;
 
 const HIT_EVENTS = new Set(["single", "double", "triple", "home_run"]);
 const HOME_RUN_EVENTS = new Set(["home_run"]);
@@ -149,6 +205,45 @@ function summarizePitcherOutcomeSuppression(
     strikeoutRate: finalRows.length > 0 ? strikeouts / finalRows.length : null,
     sampleSize: outcomeSummary.atBats,
   };
+}
+
+function summarizeRecentGameLog(input: AnalysisModelInput["hitter"]["recentGames"]) {
+  const atBats = input.reduce((total, game) => total + game.atBats, 0);
+  const hits = input.reduce((total, game) => total + game.hits, 0);
+  const homeRuns = input.reduce((total, game) => total + game.homeRuns, 0);
+  const hitGames = input.filter((game) => game.hits > 0).length;
+  const runProduction = input.reduce((total, game) => total + game.runs + game.rbi, 0);
+
+  return {
+    atBats,
+    hits,
+    homeRuns,
+    hitGames,
+    runProduction,
+    hitRate: atBats > 0 ? hits / atBats : null,
+    homeRunRate: atBats > 0 ? homeRuns / atBats : null,
+  };
+}
+
+function computeRecentGameAdjustment(
+  recentGames: ReturnType<typeof summarizeRecentGameLog>,
+  market: AnalysisMarket,
+) {
+  if (recentGames.atBats < 8) {
+    return 0;
+  }
+
+  if (market === "home_run") {
+    const rateEdge = ((recentGames.homeRunRate ?? LEAGUE_HOME_RUN_RATE) - LEAGUE_HOME_RUN_RATE) * 0.28;
+    const productionEdge = clamp((recentGames.runProduction - 4) * 0.002, -0.006, 0.008);
+
+    return clamp(rateEdge + productionEdge, -0.012, 0.018);
+  }
+
+  const hitRateEdge = ((recentGames.hitRate ?? LEAGUE_HIT_RATE) - LEAGUE_HIT_RATE) * 0.12;
+  const consistencyEdge = ((recentGames.hitGames / 5) - 0.55) * 0.035;
+
+  return clamp(hitRateEdge + consistencyEdge, -0.028, 0.035);
 }
 
 function computePitchMixEdge(
@@ -369,6 +464,77 @@ function safeRate(numerator: number | null | undefined, denominator: number | nu
   return numerator / denominator;
 }
 
+function shrinkRate(
+  observed: number | null | undefined,
+  sampleSize: number | null | undefined,
+  prior: number,
+  stabilizationPoint: number,
+) {
+  if (observed === null || observed === undefined || !Number.isFinite(observed)) {
+    return prior;
+  }
+
+  const sample = Math.max(sampleSize ?? 0, 0);
+  const weight = sample / (sample + stabilizationPoint);
+
+  return observed * weight + prior * (1 - weight);
+}
+
+function poissonBinomialAtLeastTwo(probability: number, opportunities: number) {
+  const noHits = (1 - probability) ** opportunities;
+  const exactlyOne = opportunities * probability * (1 - probability) ** Math.max(opportunities - 1, 0);
+
+  return clamp(1 - noHits - exactlyOne, 0, 1);
+}
+
+function estimateTeamObp(input: AnalysisModelInput) {
+  const hitterObp = input.hitter.season?.obp ?? input.hitter.priorSeason?.obp;
+
+  return shrinkRate(
+    hitterObp,
+    input.hitter.season?.plateAppearances ?? input.hitter.priorSeason?.plateAppearances,
+    LEAGUE_TEAM_OBP,
+    220,
+  );
+}
+
+export function estimateProjectedOpportunities(input: AnalysisModelInput) {
+  const config = HIT_PROBABILITY_MODEL_CONFIG;
+  const seasonAtBatsPerGame =
+    safeRate(input.hitter.season?.atBats, input.hitter.season?.gamesPlayed) ??
+    safeRate(input.hitter.priorSeason?.atBats, input.hitter.priorSeason?.gamesPlayed) ??
+    3.9;
+  const lineupPlateAppearances =
+    input.hitter.lineupSlot ? config.lineupPlateAppearances[input.hitter.lineupSlot] : null;
+  const teamObp = estimateTeamObp(input);
+  const teamContextAdjustment = clamp(
+    (teamObp - LEAGUE_TEAM_OBP) * config.adjustmentScales.teamObp,
+    -config.caps.opportunityTeam,
+    config.caps.opportunityTeam,
+  );
+  const homeAdjustment =
+    input.hitter.player.currentTeamId === input.game.homeTeam.id ? -0.06 : 0.04;
+  const projectedPlateAppearances = clamp(
+    (lineupPlateAppearances ?? seasonAtBatsPerGame + 0.55) + teamContextAdjustment + homeAdjustment,
+    3.2,
+    5.15,
+  );
+  const atBatShare = clamp(
+    safeRate(input.hitter.season?.atBats, input.hitter.season?.plateAppearances) ??
+      safeRate(input.hitter.priorSeason?.atBats, input.hitter.priorSeason?.plateAppearances) ??
+      0.88,
+    0.76,
+    0.94,
+  );
+
+  return {
+    projectedPlateAppearances,
+    projectedAtBats: clamp(projectedPlateAppearances * atBatShare, 3.05, 5.05),
+    teamContextAdjustment,
+    homeAdjustment,
+  };
+}
+
 function extractExpectedIso(input: AnalysisModelInput["hitter"] | AnalysisModelInput["pitcher"]): number | null {
   const xSlugging = input.expected?.expectedSlugging ?? input.expected?.slugging;
   const xAverage = input.expected?.expectedBattingAverage ?? input.expected?.battingAverage;
@@ -414,6 +580,156 @@ function isoToHomeRunRate(iso: number | null | undefined): number | null {
   }
 
   return clamp(iso / 5, 0.01, 0.09);
+}
+
+function estimateHitPerOpportunity(
+  input: AnalysisModelInput,
+  batterForm: ReturnType<typeof summarizeBatterOutcomeForm>,
+  pitcherOutcome: ReturnType<typeof summarizePitcherOutcomeSuppression>,
+  pitcherExpectedHitRate: number,
+  pitcherStrikeoutRate: number,
+  recentGameLog: ReturnType<typeof summarizeRecentGameLog>,
+  feedbackCalibration: number,
+) {
+  const config = HIT_PROBABILITY_MODEL_CONFIG;
+  const seasonAverage = shrinkRate(
+    input.hitter.season?.avg,
+    input.hitter.season?.atBats,
+    config.leagueHitRate,
+    config.shrinkage.hitterSeasonAtBats,
+  );
+  const expectedAverage = shrinkRate(
+    input.hitter.expected?.expectedBattingAverage ?? input.hitter.expected?.battingAverage,
+    input.hitter.expected?.plateAppearances,
+    seasonAverage,
+    config.shrinkage.expectedStatsPlateAppearances,
+  );
+  const obpSkill =
+    shrinkRate(
+      input.hitter.season?.obp,
+      input.hitter.season?.plateAppearances,
+      LEAGUE_TEAM_OBP,
+      config.shrinkage.hitterSeasonAtBats,
+    ) - LEAGUE_TEAM_OBP;
+  const slugSkill =
+    shrinkRate(
+      input.hitter.season?.slg,
+      input.hitter.season?.atBats,
+      LEAGUE_HIT_RATE + LEAGUE_POWER_ISO,
+      config.shrinkage.hitterSeasonAtBats,
+    ) -
+    (LEAGUE_HIT_RATE + LEAGUE_POWER_ISO);
+  const statcastOutcome = shrinkRate(
+    batterForm.overallRate,
+    batterForm.sampleSize,
+    seasonAverage,
+    config.shrinkage.hitterSeasonAtBats,
+  );
+  const hardHitEdge = (batterForm.hardHitRate ?? LEAGUE_HARD_HIT_RATE) - LEAGUE_HARD_HIT_RATE;
+
+  const baseline = clamp(
+    seasonAverage * config.baselineWeights.seasonAverage +
+      expectedAverage * config.baselineWeights.expectedAverage +
+      statcastOutcome * config.baselineWeights.statcastOutcome +
+      config.leagueHitRate *
+        (1 -
+          config.baselineWeights.seasonAverage -
+          config.baselineWeights.expectedAverage -
+          config.baselineWeights.statcastOutcome) +
+      obpSkill * config.baselineWeights.obpSkill +
+      slugSkill * config.baselineWeights.slugSkill +
+      hardHitEdge * config.baselineWeights.hardHit,
+    0.14,
+    0.38,
+  );
+  const platoonRate = shrinkRate(
+    batterForm.versusHandRate,
+    batterForm.sampleSize,
+    baseline,
+    config.shrinkage.handSplitAtBats,
+  );
+  const platoonAdjustment = clamp(
+    (platoonRate - baseline) * config.adjustmentScales.platoon,
+    -config.caps.platoon,
+    config.caps.platoon,
+  );
+  const pitcherAverageAdjustment = (pitcherExpectedHitRate - config.leagueHitRate) * config.adjustmentScales.pitcherAverage;
+  const pitcherWhipAdjustment =
+    ((input.pitcher.season?.whip ?? input.pitcher.priorSeason?.whip ?? 1.28) - 1.28) *
+    config.adjustmentScales.pitcherWhip;
+  const pitcherContactAdjustment =
+    ((pitcherOutcome.hardHitRateAllowed ?? LEAGUE_HARD_HIT_RATE) - LEAGUE_HARD_HIT_RATE) *
+    config.adjustmentScales.pitcherHardHit;
+  const pitcherKAdjustment =
+    (pitcherStrikeoutRate - LEAGUE_STRIKEOUT_RATE) * config.adjustmentScales.pitcherStrikeout;
+  const pitcherAdjustment = clamp(
+    pitcherAverageAdjustment + pitcherWhipAdjustment + pitcherContactAdjustment + pitcherKAdjustment,
+    -config.caps.pitcher,
+    config.caps.pitcher,
+  );
+  const bullpenAdjustment = clamp(
+    computeDefenseAdjustment(input.defense, "hit") * config.adjustmentScales.bullpenDefenseProxy,
+    -config.caps.bullpen,
+    config.caps.bullpen,
+  );
+  const recentHitRate = shrinkRate(
+    recentGameLog.hitRate,
+    recentGameLog.atBats,
+    baseline,
+    config.shrinkage.recentAtBats,
+  );
+  const recentAdjustment = clamp(
+    (recentHitRate - baseline) * config.adjustmentScales.recentForm +
+      ((recentGameLog.hitGames / Math.max(input.hitter.recentGames.length, 1)) - 0.55) *
+        config.adjustmentScales.recentConsistency,
+    -config.caps.recent,
+    config.caps.recent,
+  );
+  const parkAdjustment = computeParkAdjustment(input.venue, "hit");
+  const weatherAdjustment = computeWeatherAdjustment(
+    input.weather,
+    input.venue?.roofType ?? null,
+    "hit",
+  );
+  const pitchMix = computePitchMixEdge(
+    input.hitter.events,
+    input.pitcher.pitchMix,
+    HIT_EVENTS,
+    baseline,
+    0.28,
+    -0.015,
+    0.015,
+  );
+  const perOpportunity = clamp(
+    baseline +
+      platoonAdjustment +
+      pitcherAdjustment +
+      pitchMix.adjustment +
+      bullpenAdjustment +
+      parkAdjustment +
+      weatherAdjustment +
+      recentAdjustment +
+      feedbackCalibration,
+    config.minPerOpportunity,
+    config.maxPerOpportunity,
+  );
+
+  return {
+    baseline,
+    seasonAverage,
+    expectedAverage,
+    statcastOutcome,
+    hardHitEdge,
+    platoonAdjustment,
+    pitcherAdjustment,
+    pitchMixAdjustment: pitchMix.adjustment,
+    pitchMixCoverage: pitchMix.coverage,
+    bullpenAdjustment,
+    parkAdjustment,
+    weatherAdjustment,
+    recentAdjustment,
+    perOpportunity,
+  };
 }
 
 export function scoreOutcomeChance(
@@ -474,6 +790,8 @@ export function scoreOutcomeChance(
     input.game.officialDate,
     outcomeEvents,
   );
+  const recentGameLog = summarizeRecentGameLog(input.hitter.recentGames);
+  const recentGameAdjustment = computeRecentGameAdjustment(recentGameLog, market);
 
   const pitcherCurrentSample =
     input.pitcher.season?.battersFaced ?? input.pitcher.expected?.plateAppearances ?? 0;
@@ -530,44 +848,26 @@ export function scoreOutcomeChance(
   let pitcherAdjustment = 0;
   let pitchMixAdjustment = 0;
   let pitchMixCoverage = 0;
+  let bullpenAdjustment = 0;
+  let hitModel:
+    | ReturnType<typeof estimateHitPerOpportunity>
+    | null = null;
 
   if (market === "hit") {
-    baseline = clamp(
-      hitterSeasonHitRate * 0.32 +
-        (hitterExpectedHitRate ?? hitterSeasonHitRate) * 0.28 +
-        (batterForm.versusHandRate ?? hitterSeasonHitRate) * 0.24 +
-        (batterForm.recentRate ?? hitterSeasonHitRate) * 0.16 +
-        ((batterForm.hardHitRate ?? LEAGUE_HARD_HIT_RATE) - LEAGUE_HARD_HIT_RATE) * 0.05 +
-        clamp(
-          (((input.hitter.sprint?.sprintSpeed ?? LEAGUE_SPRINT_SPEED) - LEAGUE_SPRINT_SPEED) /
-            3) *
-            0.012,
-          -0.01,
-          0.01,
-        ),
-      0.14,
-      0.4,
+    hitModel = estimateHitPerOpportunity(
+      input,
+      batterForm,
+      pitcherOutcome,
+      pitcherExpectedHitRate,
+      pitcherStrikeoutRate,
+      recentGameLog,
+      feedbackCalibration,
     );
-
-    pitcherAdjustment = clamp(
-      (pitcherExpectedHitRate - LEAGUE_HIT_RATE) * 0.65 +
-        (pitcherHardHitRate - LEAGUE_HARD_HIT_RATE) * 0.06 -
-        (pitcherStrikeoutRate - LEAGUE_STRIKEOUT_RATE) * 0.05,
-      -0.06,
-      0.06,
-    );
-
-    const pitchMix = computePitchMixEdge(
-      input.hitter.events,
-      input.pitcher.pitchMix,
-      HIT_EVENTS,
-      hitterSeasonHitRate,
-      0.4,
-      -0.02,
-      0.02,
-    );
-    pitchMixAdjustment = pitchMix.adjustment;
-    pitchMixCoverage = pitchMix.coverage;
+    baseline = hitModel.baseline;
+    pitcherAdjustment = hitModel.pitcherAdjustment;
+    pitchMixAdjustment = hitModel.pitchMixAdjustment;
+    pitchMixCoverage = hitModel.pitchMixCoverage;
+    bullpenAdjustment = hitModel.bullpenAdjustment;
   } else {
     baseline = clamp(
       hitterSeasonHomeRunRate * 0.44 +
@@ -612,47 +912,38 @@ export function scoreOutcomeChance(
     market,
   );
 
-  const perAtBat = clamp(
-    baseline +
-      pitcherAdjustment +
-      pitchMixAdjustment +
-      defenseAdjustment +
-      parkAdjustment +
-      weatherAdjustment +
-      feedbackCalibration,
-    market === "home_run" ? 0.005 : 0.1,
-    market === "home_run" ? 0.2 : 0.45,
-  );
+  const contextPerAtBat =
+    market === "hit" && hitModel
+      ? hitModel.perOpportunity
+      : clamp(
+          baseline +
+            pitcherAdjustment +
+            pitchMixAdjustment +
+            recentGameAdjustment +
+            defenseAdjustment +
+            parkAdjustment +
+            weatherAdjustment +
+            feedbackCalibration,
+          0.005,
+          0.2,
+        );
 
-  const seasonExpectedAtBats = clamp(
-    ((input.hitter.season?.atBats ?? 0) / Math.max(input.hitter.season?.gamesPlayed ?? 1, 1)) ||
-      4,
-    3.2,
-    5.1,
-  );
-  const lineupExpectedAtBats = input.hitter.lineupSlot
-    ? {
-        1: 4.7,
-        2: 4.6,
-        3: 4.5,
-        4: 4.4,
-        5: 4.3,
-        6: 4.1,
-        7: 4.0,
-        8: 3.9,
-        9: 3.8,
-      }[input.hitter.lineupSlot]
-    : null;
-  const expectedAtBats = clamp(
-    lineupExpectedAtBats
-      ? seasonExpectedAtBats * 0.35 + lineupExpectedAtBats * 0.65
-      : seasonExpectedAtBats,
-    3.2,
-    5.1,
-  );
+  const opportunityProjection = estimateProjectedOpportunities(input);
+  const expectedAtBats =
+    market === "hit"
+      ? opportunityProjection.projectedAtBats
+      : opportunityProjection.projectedAtBats;
 
+  const mlPrediction = market === "hit" ? predictHitWithMl(input) : null;
+  const perAtBat = mlPrediction?.inferredPerAtBat ?? contextPerAtBat;
   const atLeastOne = 1 - (1 - perAtBat) ** expectedAtBats;
-  const recommendation = recommendationForProbability(atLeastOne, market);
+  const finalAtLeastOne = mlPrediction?.probability1PlusHit ?? atLeastOne;
+  const expectedHits = market === "hit" ? mlPrediction?.expectedHits ?? expectedAtBats * perAtBat : null;
+  const atLeastTwo =
+    market === "hit"
+      ? mlPrediction?.probability2PlusHits ?? poissonBinomialAtLeastTwo(perAtBat, expectedAtBats)
+      : null;
+  const recommendation = recommendationForProbability(finalAtLeastOne, market);
 
   const diagnostics: AnalysisDiagnostics = {
     hitterSampleSize: batterForm.sampleSize,
@@ -682,11 +973,26 @@ export function scoreOutcomeChance(
             )}. Recent HR form ${formatDecimal(
               batterForm.recentRate ?? hitterSeasonHomeRunRate,
             )}.`
-          : `Season AVG ${formatDecimal(hitterSeasonHitRate)} with 2025 stabilization. Expected AVG ${formatDecimal(
-              hitterExpectedHitRate ?? hitterSeasonHitRate,
-            )}. Recent form ${formatDecimal(
-              batterForm.recentRate ?? hitterSeasonHitRate,
-            )}.`,
+          : `Weighted season AVG ${formatDecimal(
+              hitModel?.seasonAverage ?? hitterSeasonHitRate,
+            )}, xBA/contact estimate ${formatDecimal(
+              hitModel?.expectedAverage ?? hitterExpectedHitRate ?? hitterSeasonHitRate,
+            )}, Statcast outcome rate ${formatDecimal(
+              hitModel?.statcastOutcome ?? batterForm.overallRate ?? hitterSeasonHitRate,
+            )}, and hard-hit edge ${formatDecimal(hitModel?.hardHitEdge ?? 0)}.`,
+    },
+    {
+      label: "Handedness split",
+      value: `${(hitModel?.platoonAdjustment ?? 0) >= 0 ? "+" : ""}${formatDecimal(
+        hitModel?.platoonAdjustment ?? 0,
+      )}`,
+      impact: impactLabel(hitModel?.platoonAdjustment ?? 0),
+      detail:
+        market === "hit"
+          ? input.pitcher.player?.pitchHand
+            ? `Batter results against ${input.pitcher.player.pitchHand}-handed pitching were shrunk toward the hitter baseline before adjusting the projection.`
+            : "No probable pitcher handedness was available, so platoon stayed neutral."
+          : "Home-run mode keeps handedness inside the power baseline and pitch-mix factors.",
     },
     {
       label: market === "home_run" ? "Pitcher power matchup" : "Pitcher matchup",
@@ -716,9 +1022,24 @@ export function scoreOutcomeChance(
           : "No reliable pitch-mix sample was available, so this factor stayed neutral.",
     },
     {
-      label: market === "home_run" ? "Defense impact" : "Opposing defense",
-      value: `${defenseAdjustment >= 0 ? "+" : ""}${formatDecimal(defenseAdjustment)}`,
-      impact: impactLabel(defenseAdjustment),
+      label: "Last 5 games",
+      value: `${(hitModel?.recentAdjustment ?? recentGameAdjustment) >= 0 ? "+" : ""}${formatDecimal(
+        hitModel?.recentAdjustment ?? recentGameAdjustment,
+      )}`,
+      impact: impactLabel(hitModel?.recentAdjustment ?? recentGameAdjustment),
+      detail:
+        recentGameLog.atBats > 0
+          ? market === "home_run"
+            ? `${input.hitter.player.fullName} has ${recentGameLog.hits} hits, ${recentGameLog.homeRuns} HR, and ${recentGameLog.runProduction} runs plus RBI over ${recentGameLog.atBats} AB in the last 5 games.`
+            : `${input.hitter.player.fullName} has ${recentGameLog.hits} hits in ${recentGameLog.atBats} AB and recorded a hit in ${recentGameLog.hitGames} of the last 5 games.`
+          : "No recent game-log sample was available, so this factor stayed neutral.",
+    },
+    {
+      label: market === "home_run" ? "Defense impact" : "Bullpen/defense proxy",
+      value: `${(market === "hit" ? bullpenAdjustment : defenseAdjustment) >= 0 ? "+" : ""}${formatDecimal(
+        market === "hit" ? bullpenAdjustment : defenseAdjustment,
+      )}`,
+      impact: impactLabel(market === "hit" ? bullpenAdjustment : defenseAdjustment),
       detail:
         market === "home_run"
           ? "Defense matters much less once the ball clears the wall, so this factor stays close to neutral."
@@ -755,6 +1076,16 @@ export function scoreOutcomeChance(
           }% precip chance, and ${Math.round(input.weather.windSpeedMph ?? 0)} mph wind.`
         : "No usable forecast was available, so weather did not move the model.",
     },
+    {
+      label: "Projected chances",
+      value: `${expectedAtBats.toFixed(1)} AB`,
+      impact: "neutral",
+      detail: `Lineup slot ${
+        input.hitter.lineupSlot ?? "unknown"
+      }, home/away context, and offensive environment project ${opportunityProjection.projectedPlateAppearances.toFixed(
+        1,
+      )} plate appearances and ${expectedAtBats.toFixed(1)} at-bats.`,
+    },
   ];
 
   if (feedbackCalibration !== 0) {
@@ -767,7 +1098,28 @@ export function scoreOutcomeChance(
     });
   }
 
+  if (mlPrediction) {
+    factors.unshift({
+      label: "ML model",
+      value: formatPercent(mlPrediction.probability1PlusHit),
+      impact: "neutral",
+      detail: `Regularized logistic regression artifact ${mlPrediction.modelVersion} produced the final 1+ hit probability. Top drivers: ${mlPrediction.topContributors
+        .map(
+          (entry) =>
+            `${entry.feature} ${entry.contribution >= 0 ? "+" : ""}${formatDecimal(
+              entry.contribution,
+              3,
+            )}`,
+        )
+        .join(", ")}.`,
+    });
+  }
+
   const notes: string[] = [];
+
+  if (!mlPrediction && market === "hit") {
+    notes.push("No trained ML artifact was found, so the app used the context-aware fallback model.");
+  }
 
   if (!input.pitcher.probable) {
     notes.push("Probable pitcher was not confirmed for this game, so confidence is lower.");
@@ -794,6 +1146,9 @@ export function scoreOutcomeChance(
   if (input.hitter.lineupSlot) {
     notes.push(`Expected at-bats were adjusted using the live lineup slot (${input.hitter.lineupSlot}).`);
   }
+  if (input.hitter.recentGames.length > 0) {
+    notes.push("Last-5 game-log form was included as a short-term adjustment.");
+  }
   if (feedbackCalibration !== 0) {
     notes.push("Saved feedback has started calibrating this market.");
   }
@@ -801,12 +1156,14 @@ export function scoreOutcomeChance(
   return {
     market,
     marketLabel,
-    modelVersion: MODEL_VERSION,
+    modelVersion: mlPrediction ? `${MODEL_VERSION}+${mlPrediction.modelVersion}` : MODEL_VERSION,
     recommendation,
     confidence,
     probabilities: {
       perAtBat,
-      atLeastOne,
+      atLeastOne: finalAtLeastOne,
+      atLeastTwo,
+      expectedHits,
       expectedAtBats,
     },
     hitter: {
@@ -817,6 +1174,7 @@ export function scoreOutcomeChance(
       priorExpected: input.hitter.priorExpected,
       sprint: input.hitter.sprint,
       lineupSlot: input.hitter.lineupSlot,
+      recentGames: input.hitter.recentGames,
     },
     pitcher: {
       player: input.pitcher.player,
@@ -836,12 +1194,18 @@ export function scoreOutcomeChance(
     diagnostics,
     batterVsPitcher: null,
     summary: `${input.hitter.player.fullName} projects for a ${formatPercent(
-      atLeastOne,
+      finalAtLeastOne,
     )} chance of at least one ${market === "home_run" ? "home run" : "hit"}, built from a ${formatPercent(
       perAtBat,
     )} per-at-bat ${market === "home_run" ? "home-run" : "hit"} rate over roughly ${expectedAtBats.toFixed(
       1,
-    )} expected at-bats.`,
+    )} expected at-bats${
+      market === "hit" && expectedHits !== null && atLeastTwo !== null
+        ? `, ${expectedHits.toFixed(2)} expected hits, and a ${formatPercent(
+            atLeastTwo,
+          )} chance of 2+ hits`
+        : ""
+    }.`,
   };
 }
 

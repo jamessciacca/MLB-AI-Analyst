@@ -34,9 +34,20 @@ type ColorTheme = "light" | "dark";
 type ParlayPlayer = {
   id: number;
   name: string;
+  batSide: string | null;
   team: string | null;
   market: AnalysisMarket | null;
   probability: number | null;
+  odds: {
+    line: number | null;
+    over: string | null;
+  } | null;
+};
+
+type ManualOdds = Record<string, string>;
+type AnalysisChatMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 const THEME_STORAGE_KEY = "mlb-analyst-theme";
@@ -78,8 +89,92 @@ function formatOptionalNumber(value: number | null | undefined, digits = 1) {
   return value.toFixed(digits);
 }
 
+function formatShortDate(date: string) {
+  const parsed = new Date(`${date}T12:00:00`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+  }).format(parsed);
+}
+
 function getMarketLabel(market: AnalysisMarket) {
   return market === "home_run" ? "Home Run" : "Hit";
+}
+
+function formatAmericanOdds(decimalValue: string | null | undefined) {
+  const decimalOdds = parseDecimalOdds(decimalValue);
+
+  if (decimalOdds === null) {
+    return "n/a";
+  }
+
+  if (decimalOdds >= 2) {
+    return `+${Math.round((decimalOdds - 1) * 100)}`;
+  }
+
+  return `-${Math.round(100 / (decimalOdds - 1))}`;
+}
+
+function getOddsMarketText(market: AnalysisMarket) {
+  return market === "home_run" ? "Home Run" : "1+ Hits";
+}
+
+function formatDraftKingsOdds(analysis: AnalysisResult) {
+  const odds = analysis.odds;
+
+  if (!odds || odds.status === "disabled") {
+    return "Not configured";
+  }
+
+  if (odds.status !== "available") {
+    return "Not posted";
+  }
+
+  return `${getOddsMarketText(analysis.market)} ${formatAmericanOdds(odds.over)}`;
+}
+
+function parseDecimalOdds(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 1 ? parsed : null;
+}
+
+function americanOddsToDecimal(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/^\+/, "");
+  const american = Number.parseInt(normalized, 10);
+
+  if (!Number.isFinite(american) || american === 0) {
+    return null;
+  }
+
+  if (american > 0) {
+    return (american / 100 + 1).toFixed(2);
+  }
+
+  return (100 / Math.abs(american) + 1).toFixed(2);
+}
+
+function getManualOddsKey(result: AnalysisResult) {
+  return `${result.hitter.player.id}:${result.game.gamePk}:${result.market}`;
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(value);
 }
 
 function getPitchHandLabel(hand: string | null | undefined) {
@@ -92,6 +187,20 @@ function getPitchHandLabel(hand: string | null | undefined) {
   }
 
   return "Unknown";
+}
+
+function formatBatSideNotation(hand: string | null | undefined) {
+  if (hand === "L" || hand === "R" || hand === "S") {
+    return `(${hand})`;
+  }
+
+  return "";
+}
+
+function formatPlayerNameWithBatSide(player: Pick<PlayerSearchResult, "fullName" | "batSide">) {
+  const notation = formatBatSideNotation(player.batSide);
+
+  return notation ? `${player.fullName} ${notation}` : player.fullName;
 }
 
 function buildGameLabel(game: GameSummary) {
@@ -149,6 +258,43 @@ function getScheduleWeatherClass(game: GameSummary) {
   return `weather-${game.weather?.condition ?? "unknown"}`;
 }
 
+function getLineupStatusLabel(game: GameSummary) {
+  const status = game.lineupStatus?.status ?? "pending";
+
+  if (status === "released") {
+    return "Lineup Released";
+  }
+
+  if (status === "partial") {
+    return `Partial Lineup ${game.lineupStatus?.totalCount ?? 0}/18`;
+  }
+
+  return "Lineup Pending";
+}
+
+function canShowLineup(game: GameSummary) {
+  return (game.lineupStatus?.totalCount ?? 0) > 0;
+}
+
+function isFinalGame(game: GameSummary) {
+  const status = game.status.toLowerCase();
+  return status.includes("final") || status.includes("game over") || status.includes("completed");
+}
+
+function getGameWinner(game: GameSummary) {
+  if (
+    game.homeScore === null ||
+    game.homeScore === undefined ||
+    game.awayScore === null ||
+    game.awayScore === undefined ||
+    game.homeScore === game.awayScore
+  ) {
+    return null;
+  }
+
+  return game.homeScore > game.awayScore ? "home" : "away";
+}
+
 function buildTeamLogoUrl(teamId: number) {
   return `https://www.mlbstatic.com/team-logos/${teamId}.svg`;
 }
@@ -181,6 +327,30 @@ function formatScheduleDate(date: string) {
   return new Intl.DateTimeFormat("en-US", {
     weekday: "long",
     month: "long",
+    day: "numeric",
+  }).format(parsed);
+}
+
+function shiftIsoDate(date: string, offsetDays: number) {
+  const parsed = new Date(`${date}T12:00:00`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
+  }
+
+  parsed.setDate(parsed.getDate() + offsetDays);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function formatScheduleOptionDate(date: string) {
+  const parsed = new Date(`${date}T12:00:00`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
     day: "numeric",
   }).format(parsed);
 }
@@ -223,6 +393,7 @@ function getPreviousResultMarker(
 
 export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const resultsRef = useRef<HTMLElement | null>(null);
+  const analysisDetailRef = useRef<HTMLDivElement | null>(null);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [players, setPlayers] = useState<PlayerSearchResult[]>([]);
@@ -238,9 +409,12 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const [isSearching, setIsSearching] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isComparingLineup, setIsComparingLineup] = useState(false);
+  const [detailLoadingPlayerId, setDetailLoadingPlayerId] = useState<number | null>(null);
   const [isAuditingOutcomes, setIsAuditingOutcomes] = useState(false);
   const [showModelDetails, setShowModelDetails] = useState(false);
   const [showScheduleMenu, setShowScheduleMenu] = useState(false);
+  const [showScheduleDateMenu, setShowScheduleDateMenu] = useState(false);
+  const [expandedLineupGamePk, setExpandedLineupGamePk] = useState<number | null>(null);
   const colorTheme = useSyncExternalStore(
     subscribeToThemeChanges,
     getStoredTheme,
@@ -249,12 +423,34 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const [lineupComparisonMarket, setLineupComparisonMarket] =
     useState<AnalysisMarket | null>(null);
   const [parlayPlayers, setParlayPlayers] = useState<ParlayPlayer[]>([]);
+  const [parlayStake, setParlayStake] = useState("10");
+  const [manualOdds, setManualOdds] = useState<ManualOdds>({});
+  const [analysisChatMessages, setAnalysisChatMessages] = useState<AnalysisChatMessage[]>([]);
+  const [analysisChatInput, setAnalysisChatInput] = useState("");
+  const [isAnalysisChatLoading, setIsAnalysisChatLoading] = useState(false);
   const [feedbackNote, setFeedbackNote] = useState("");
   const [feedbackImage, setFeedbackImage] = useState<File | null>(null);
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
   const analysisId = analysis?.analysisId ?? null;
   const lineupComparisonId = lineupComparison?.generatedAt ?? null;
   const hasResults = Boolean(analysisId || lineupComparison?.topPick);
+  const parlayStakeValue = Number.parseFloat(parlayStake);
+  const normalizedParlayStake =
+    Number.isFinite(parlayStakeValue) && parlayStakeValue > 0 ? parlayStakeValue : 0;
+  const parlayLegOdds = parlayPlayers
+    .map((player) => parseDecimalOdds(player.odds?.over))
+    .filter((value): value is number => value !== null);
+  const missingParlayOdds = parlayPlayers.length - parlayLegOdds.length;
+  const combinedParlayOdds =
+    parlayLegOdds.length > 0
+      ? parlayLegOdds.reduce((product, odds) => product * odds, 1)
+      : null;
+  const parlayPayout =
+    combinedParlayOdds !== null && missingParlayOdds === 0
+      ? normalizedParlayStake * combinedParlayOdds
+      : null;
+  const parlayProfit =
+    parlayPayout !== null ? parlayPayout - normalizedParlayStake : null;
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
@@ -264,6 +460,16 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     const controller = new AbortController();
 
     async function loadPlayers() {
+      if (
+        selectedPlayer &&
+        deferredQuery.trim().toLowerCase() === selectedPlayer.fullName.toLowerCase()
+      ) {
+        setPlayers([]);
+        setActivePlayerIndex(-1);
+        setIsSearching(false);
+        return;
+      }
+
       if (deferredQuery.trim().length < 2) {
         setPlayers([]);
         setActivePlayerIndex(-1);
@@ -302,7 +508,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
     void loadPlayers();
     return () => controller.abort();
-  }, [deferredQuery]);
+  }, [deferredQuery, selectedPlayer]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -398,13 +604,103 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   }
 
   function addAnalysisToParlay(result: AnalysisResult) {
+    const manualDecimalOdds = americanOddsToDecimal(manualOdds[getManualOddsKey(result)]);
+
     addPlayerToParlay({
       id: result.hitter.player.id,
       name: result.hitter.player.fullName,
+      batSide: result.hitter.player.batSide,
       team: result.hitter.player.currentTeamAbbreviation,
       market: result.market,
       probability: result.probabilities.atLeastOne,
+      odds:
+        manualDecimalOdds
+          ? {
+              line: 0.5,
+              over: manualDecimalOdds,
+            }
+          : result.odds?.status === "available"
+          ? {
+              line: result.odds.line,
+              over: result.odds.over,
+            }
+        : null,
     });
+  }
+
+  function showLineupPlayerDetails(result: AnalysisResult) {
+    setDetailLoadingPlayerId(result.hitter.player.id);
+    setFeedbackStatus(null);
+
+    window.setTimeout(() => {
+      setAnalysis(result);
+
+      window.requestAnimationFrame(() => {
+        analysisDetailRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+
+        window.setTimeout(() => {
+          setDetailLoadingPlayerId(null);
+        }, 220);
+      });
+    }, 120);
+  }
+
+  async function askAnalysisChat() {
+    if (!analysis || !analysisChatInput.trim() || isAnalysisChatLoading) {
+      return;
+    }
+
+    const userMessage: AnalysisChatMessage = {
+      role: "user",
+      content: analysisChatInput.trim(),
+    };
+    const nextMessages = [...analysisChatMessages, userMessage];
+
+    setAnalysisChatMessages(nextMessages);
+    setAnalysisChatInput("");
+    setIsAnalysisChatLoading(true);
+
+    try {
+      const response = await fetch("/api/analysis-chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          analysis,
+          messages: nextMessages,
+        }),
+      });
+      const data = (await response.json()) as { answer?: string; error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Unable to answer that question.");
+      }
+
+      setAnalysisChatMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: data.answer ?? "I could not answer that from the current analysis.",
+        },
+      ]);
+    } catch (chatError) {
+      setAnalysisChatMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content:
+            chatError instanceof Error
+              ? chatError.message
+              : "Unable to answer that question right now.",
+        },
+      ]);
+    } finally {
+      setIsAnalysisChatLoading(false);
+    }
   }
 
   function handlePlayerSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -636,13 +932,31 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
       : analysis?.recommendation === "avoid"
         ? "negative"
         : "neutral";
-  const isModelLoading = isAnalyzing || isComparingLineup;
-  const loadingTitle = isComparingLineup
-    ? "Comparing The Lineup"
-    : "Running Matchup Model";
-  const loadingMessage = isComparingLineup
-    ? "Ranking the published starters, matchup context, and weather signal."
-    : "Checking hitter form, pitcher profile, weather, prior results, and matchup history.";
+  const isDetailLoading = detailLoadingPlayerId !== null;
+  const isModelLoading = isAnalyzing || isComparingLineup || isDetailLoading;
+  const loadingTitle = isDetailLoading
+    ? "Loading Batter Details"
+    : isComparingLineup
+      ? "Comparing The Lineup"
+      : "Running Matchup Model";
+  const loadingMessage = isDetailLoading
+    ? "Opening the full matchup view, recent form, and model factors for this player."
+    : isComparingLineup
+      ? "Ranking the published starters, matchup context, and weather signal."
+      : "Checking hitter form, pitcher profile, weather, prior results, and matchup history.";
+  const scheduleDateOptions = [-3, -2, -1, 0, 1, 2, 3].map((offset) =>
+    shiftIsoDate(selectedDate, offset),
+  );
+
+  function changeScheduleDate(date: string) {
+    setSelectedDate(date);
+    setSelectedGamePk(null);
+    setExpandedLineupGamePk(null);
+    setShowScheduleDateMenu(false);
+    setAnalysis(null);
+    setLineupComparison(null);
+    setError(null);
+  }
 
   function renderScheduleBoard() {
     return (
@@ -650,7 +964,45 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
         <div className="section-heading-row">
           <div>
             <p className="eyebrow">Daily Board</p>
-            <h2>Schedule For {formatScheduleDate(selectedDate)}</h2>
+            <div className="schedule-title-row">
+              <h2>Schedule For {formatScheduleDate(selectedDate)}</h2>
+              <div className="schedule-date-picker">
+                <button
+                  type="button"
+                  className="schedule-date-trigger"
+                  aria-expanded={showScheduleDateMenu}
+                  aria-haspopup="listbox"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setShowScheduleDateMenu((current) => !current);
+                  }}
+                >
+                  <span>{formatScheduleOptionDate(selectedDate)}</span>
+                  <span aria-hidden="true">v</span>
+                </button>
+                {showScheduleDateMenu ? (
+                  <div className="schedule-date-menu" role="listbox">
+                    {scheduleDateOptions.map((date) => (
+                      <button
+                        key={date}
+                        type="button"
+                        className={`schedule-date-option${
+                          date === selectedDate ? " selected" : ""
+                        }`}
+                        role="option"
+                        aria-selected={date === selectedDate}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          changeScheduleDate(date);
+                        }}
+                      >
+                        {formatScheduleOptionDate(date)}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
           </div>
           <span className="schedule-count">
             {games.length === 1 ? "1 game" : `${games.length} games`}
@@ -661,11 +1013,12 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           <div className="schedule-grid">
             {games.map((game) => {
               const isSelected = selectedGamePk === game.gamePk;
+              const isLineupExpanded = expandedLineupGamePk === game.gamePk;
+              const hasLineup = canShowLineup(game);
 
               return (
-                <button
+                <div
                   key={game.gamePk}
-                  type="button"
                   className={`schedule-card ${getScheduleWeatherClass(game)}${
                     isSelected ? " selected" : ""
                   }`}
@@ -675,6 +1028,18 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     setLineupComparison(null);
                     setError(null);
                     setShowScheduleMenu(false);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedGamePk(game.gamePk);
+                      setAnalysis(null);
+                      setLineupComparison(null);
+                      setError(null);
+                      setShowScheduleMenu(false);
+                    }
                   }}
                   aria-pressed={isSelected}
                 >
@@ -720,6 +1085,19 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <span>{formatGameType(game.dayNight)}</span>
                   </div>
 
+                  {isFinalGame(game) && getGameWinner(game) ? (
+                    <div className="final-score-strip">
+                      <span className={getGameWinner(game) === "away" ? "winner" : "loser"}>
+                        {game.awayTeam.abbreviation} {game.awayScore}{" "}
+                        {getGameWinner(game) === "away" ? "W" : "L"}
+                      </span>
+                      <span className={getGameWinner(game) === "home" ? "winner" : "loser"}>
+                        {game.homeTeam.abbreviation} {game.homeScore}{" "}
+                        {getGameWinner(game) === "home" ? "W" : "L"}
+                      </span>
+                    </div>
+                  ) : null}
+
                   <div className="schedule-weather-row">
                     <span className="weather-chip">{getScheduleWeatherLabel(game)}</span>
                     {game.weather?.precipitationProbability !== null &&
@@ -740,7 +1118,60 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                       {formatPitcherDisplay(game.homeProbablePitcher)}
                     </span>
                   </div>
-                </button>
+
+                  <button
+                    type="button"
+                    className={`lineup-strip lineup-chip-${
+                      game.lineupStatus?.status ?? "pending"
+                    }`}
+                    disabled={!hasLineup}
+                    aria-expanded={isLineupExpanded}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (!hasLineup) {
+                        return;
+                      }
+                      setExpandedLineupGamePk((current) =>
+                        current === game.gamePk ? null : game.gamePk,
+                      );
+                    }}
+                  >
+                    {hasLineup
+                      ? isLineupExpanded
+                        ? "Hide Lineups"
+                        : getLineupStatusLabel(game)
+                      : getLineupStatusLabel(game)}
+                  </button>
+
+                  {isLineupExpanded ? (
+                    <div className="lineup-preview" onClick={(event) => event.stopPropagation()}>
+                      <div>
+                        <strong>{game.awayTeam.abbreviation}</strong>
+                        <ol>
+                          {(game.lineupStatus?.awayPlayers ?? []).map((player) => (
+                            <li key={player.id}>
+                              <span>{player.lineupSlot ?? "-"}</span>
+                              <span>{formatPlayerNameWithBatSide(player)}</span>
+                              <span>{player.primaryPosition ?? ""}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                      <div>
+                        <strong>{game.homeTeam.abbreviation}</strong>
+                        <ol>
+                          {(game.lineupStatus?.homePlayers ?? []).map((player) => (
+                            <li key={player.id}>
+                              <span>{player.lineupSlot ?? "-"}</span>
+                              <span>{formatPlayerNameWithBatSide(player)}</span>
+                              <span>{player.primaryPosition ?? ""}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               );
             })}
           </div>
@@ -776,36 +1207,155 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
         </div>
 
         {parlayPlayers.length > 0 ? (
-          <ul className="parlay-list">
-            {parlayPlayers.map((player) => (
-              <li key={player.id}>
-                <div>
-                  <strong>{player.name}</strong>
-                  <span>
-                    {player.team ?? "MLB"}
-                    {player.market
-                      ? ` · ${getMarketLabel(player.market)} ${
-                          player.probability !== null
-                            ? formatPercent(player.probability)
-                            : ""
-                        }`
-                      : ""}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  aria-label={`Remove ${player.name} from parlay builder`}
-                  onClick={() => removePlayerFromParlay(player.id)}
-                >
-                  x
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="parlay-list">
+              {parlayPlayers.map((player) => (
+                <li key={player.id}>
+                  <div>
+                    <strong>
+                      {formatPlayerNameWithBatSide({
+                        fullName: player.name,
+                        batSide: player.batSide,
+                      })}
+                    </strong>
+                    <span>
+                      {player.team ?? "MLB"}
+                      {player.market
+                        ? ` · ${getMarketLabel(player.market)} ${
+                            player.probability !== null
+                              ? formatPercent(player.probability)
+                              : ""
+                          }`
+                        : ""}
+                    </span>
+                    <span>
+                      DraftKings:{" "}
+                      {player.odds?.over
+                        ? `${getOddsMarketText(player.market ?? "hit")} ${formatAmericanOdds(
+                            player.odds.over,
+                          )}`
+                        : "odds not posted"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${player.name} from parlay builder`}
+                    onClick={() => removePlayerFromParlay(player.id)}
+                  >
+                    x
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            <div className="parlay-payout-card">
+              <label htmlFor="parlay-stake">
+                <span className="field-label">Stake</span>
+                <input
+                  id="parlay-stake"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={parlayStake}
+                  onChange={(event) => setParlayStake(event.target.value)}
+                />
+              </label>
+              <div className="parlay-payout-grid">
+                <span>
+                  <span className="field-label">Odds</span>
+                  <strong>
+                    {combinedParlayOdds !== null && missingParlayOdds === 0
+                      ? formatAmericanOdds(String(combinedParlayOdds))
+                      : "n/a"}
+                  </strong>
+                </span>
+                <span>
+                  <span className="field-label">Payout</span>
+                  <strong>
+                    {parlayPayout !== null ? formatCurrency(parlayPayout) : "n/a"}
+                  </strong>
+                </span>
+                <span>
+                  <span className="field-label">Profit</span>
+                  <strong>
+                    {parlayProfit !== null ? formatCurrency(parlayProfit) : "n/a"}
+                  </strong>
+                </span>
+              </div>
+              {missingParlayOdds > 0 ? (
+                <p>
+                  {missingParlayOdds} leg{missingParlayOdds === 1 ? "" : "s"} need
+                  posted DraftKings odds before payout can be calculated.
+                </p>
+              ) : null}
+            </div>
+          </>
         ) : (
           <p className="parlay-empty">Add players from the analysis card to build a shortlist.</p>
         )}
       </aside>
+
+      {analysis ? (
+        <aside className="analysis-chatbot" aria-label="Ask the model">
+          <div className="analysis-chatbot-header">
+            <div>
+              <span className="field-label">Ask The Model</span>
+              <strong>{formatPlayerNameWithBatSide(analysis.hitter.player)}</strong>
+            </div>
+            {analysisChatMessages.length > 0 ? (
+              <button
+                type="button"
+                className="analysis-chat-clear"
+                onClick={() => setAnalysisChatMessages([])}
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+
+          <div className="analysis-chat-messages" aria-live="polite">
+            {analysisChatMessages.length === 0 ? (
+              <div className="analysis-chat-empty">
+                <strong>Ask why the number moved.</strong>
+                <span>Try: “Why is the hit chance this high?” or “What lowered it?”</span>
+              </div>
+            ) : (
+              analysisChatMessages.map((message, index) => (
+                <div
+                  key={`${message.role}-${index}`}
+                  className={`analysis-chat-message ${message.role}`}
+                >
+                  {message.content}
+                </div>
+              ))
+            )}
+            {isAnalysisChatLoading ? (
+              <div className="analysis-chat-message assistant">Thinking through the model...</div>
+            ) : null}
+          </div>
+
+          <form
+            className="analysis-chat-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void askAnalysisChat();
+            }}
+          >
+            <textarea
+              value={analysisChatInput}
+              onChange={(event) => setAnalysisChatInput(event.target.value)}
+              placeholder="Ask about the percentage..."
+              rows={3}
+            />
+            <button
+              type="submit"
+              disabled={!analysisChatInput.trim() || isAnalysisChatLoading}
+            >
+              Ask
+            </button>
+          </form>
+        </aside>
+      ) : null}
 
       {isModelLoading ? (
         <div className="loading-overlay" role="status" aria-live="polite">
@@ -958,7 +1508,14 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
               placeholder="Start typing a batter's name"
               value={query}
               onChange={(event) => {
-                setQuery(event.target.value);
+                const nextQuery = event.target.value;
+                setQuery(nextQuery);
+                if (
+                  selectedPlayer &&
+                  nextQuery.trim().toLowerCase() !== selectedPlayer.fullName.toLowerCase()
+                ) {
+                  setSelectedPlayer(null);
+                }
                 setError(null);
               }}
               onKeyDown={handlePlayerSearchKeyDown}
@@ -985,10 +1542,15 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   role="option"
                   aria-selected={index === activePlayerIndex}
                   onMouseEnter={() => setActivePlayerIndex(index)}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    selectPlayer(player);
+                  }}
+                  onTouchStart={() => selectPlayer(player)}
                   onClick={() => selectPlayer(player)}
                 >
                   <span>
-                    <strong>{player.fullName}</strong>
+                    <strong>{formatPlayerNameWithBatSide(player)}</strong>
                   </span>
                   <span className="muted">
                     {player.currentTeamAbbreviation ?? "FA"} • {player.primaryPosition ?? "BAT"} •{" "}
@@ -1001,7 +1563,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
           {selectedPlayer ? (
             <div className="chip-row">
-              <span className="chip">{selectedPlayer.fullName}</span>
+              <span className="chip">{formatPlayerNameWithBatSide(selectedPlayer)}</span>
               <span className="chip">{selectedPlayer.currentTeamName ?? "No team"}</span>
               <span className="chip">
                 {selectedPlayer.batSide ?? "?"} hitter • {selectedPlayer.primaryPosition ?? "BAT"}
@@ -1039,10 +1601,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 className="text-input"
                 value={selectedDate}
                 onChange={(event) => {
-                  setSelectedDate(event.target.value);
-                  setSelectedGamePk(null);
-                  setAnalysis(null);
-                  setLineupComparison(null);
+                  changeScheduleDate(event.target.value);
                 }}
               />
             </div>
@@ -1152,7 +1711,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
             <p className="eyebrow">Starting Lineup Comparison</p>
             <h2>
               Best {lineupComparison.marketLabel.toLowerCase()} target:{" "}
-              {lineupComparison.topPick.hitter.player.fullName}
+              {formatPlayerNameWithBatSide(lineupComparison.topPick.hitter.player)}
             </h2>
             <p className="muted">
               {formatPercent(lineupComparison.topPick.probabilities.atLeastOne)} chance in{" "}
@@ -1165,20 +1724,32 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
               {lineupComparison.players.slice(0, 6).map((entry, index) => (
                 <div key={entry.analysisId} className="panel snapshot-card">
                   <h3>
-                    #{index + 1} {entry.hitter.player.fullName}
+                    #{index + 1} {formatPlayerNameWithBatSide(entry.hitter.player)}
                   </h3>
-                  <button
-                    type="button"
-                    className="compact-add-button"
-                    onClick={() => addAnalysisToParlay(entry)}
-                    disabled={parlayPlayers.some(
-                      (player) => player.id === entry.hitter.player.id,
-                    )}
-                  >
-                    {parlayPlayers.some((player) => player.id === entry.hitter.player.id)
-                      ? "Added"
-                      : "Add To Parlay"}
-                  </button>
+                  <div className="comparison-card-actions">
+                    <button
+                      type="button"
+                      className="compact-add-button"
+                      onClick={() => showLineupPlayerDetails(entry)}
+                      disabled={isDetailLoading}
+                    >
+                      {detailLoadingPlayerId === entry.hitter.player.id
+                        ? "Loading..."
+                        : "Show More"}
+                    </button>
+                    <button
+                      type="button"
+                      className="compact-add-button"
+                      onClick={() => addAnalysisToParlay(entry)}
+                      disabled={parlayPlayers.some(
+                        (player) => player.id === entry.hitter.player.id,
+                      )}
+                    >
+                      {parlayPlayers.some((player) => player.id === entry.hitter.player.id)
+                        ? "Added"
+                        : "Add To Parlay"}
+                    </button>
+                  </div>
                   <ul className="snapshot-list">
                     <li>Team: {entry.hitter.player.currentTeamAbbreviation ?? "n/a"}</li>
                     <li>Lineup slot: {entry.hitter.lineupSlot ?? "n/a"}</li>
@@ -1215,7 +1786,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           </div>
         ) : (
           <>
-            <div className="grid secondary-grid">
+            <div ref={analysisDetailRef} className="grid secondary-grid">
               <div className={`panel summary-card summary-lead ${recommendationTone}`}>
                 <div className="player-media-stack">
                   <Image
@@ -1241,7 +1812,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 <p className="eyebrow">{analysis.recommendation}</p>
                 <div className="player-result-heading">
                   <div>
-                    <h2>{analysis.hitter.player.fullName}</h2>
+                    <h2>{formatPlayerNameWithBatSide(analysis.hitter.player)}</h2>
                     <span>{analysis.hitter.player.currentTeamName ?? "MLB"}</span>
                   </div>
                 </div>
@@ -1263,7 +1834,55 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <span className="field-label">Expected ABs</span>
                     <strong>{analysis.probabilities.expectedAtBats.toFixed(1)}</strong>
                   </div>
+                  {analysis.market === "hit" ? (
+                    <>
+                      <div className="stat-box">
+                        <span className="field-label">Expected Hits</span>
+                        <strong>
+                          {analysis.probabilities.expectedHits?.toFixed(2) ?? "n/a"}
+                        </strong>
+                      </div>
+                      <div className="stat-box">
+                        <span className="field-label">2+ Hits</span>
+                        <strong>
+                          {analysis.probabilities.atLeastTwo !== null
+                            ? formatPercent(analysis.probabilities.atLeastTwo)
+                            : "n/a"}
+                        </strong>
+                      </div>
+                    </>
+                  ) : null}
+                  <div className="stat-box odds-stat-box">
+                    <span className="field-label">DraftKings Odds</span>
+                    <strong>{formatDraftKingsOdds(analysis)}</strong>
+                  </div>
                 </div>
+
+                {analysis.odds?.status !== "available" ? (
+                  <div className="manual-odds-entry">
+                    <label className="field-label" htmlFor="manual-draftkings-odds">
+                      Manual DraftKings Odds
+                    </label>
+                    <div>
+                      <input
+                        id="manual-draftkings-odds"
+                        inputMode="numeric"
+                        placeholder="-150"
+                        value={manualOdds[getManualOddsKey(analysis)] ?? ""}
+                        onChange={(event) =>
+                          setManualOdds((current) => ({
+                            ...current,
+                            [getManualOddsKey(analysis)]: event.target.value,
+                          }))
+                        }
+                      />
+                      <span>
+                        Enter the {getOddsMarketText(analysis.market)} price from DraftKings if
+                        the API missed it.
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="panel summary-card summary-notes">
@@ -1355,6 +1974,45 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <strong>{analysis.batterVsPitcher?.lastFacedDate ?? "Never"}</strong>
                   </li>
                 </ul>
+              </div>
+
+              <div className="panel summary-card recent-form-card">
+                <h2>Last 5 Games</h2>
+                <p className="muted">
+                  Recent boxscore form is included in the model as a short-term adjustment.
+                </p>
+                {analysis.hitter.recentGames.length > 0 ? (
+                  <div className="recent-game-table">
+                    <div className="recent-game-row recent-game-header">
+                      <span>Date</span>
+                      <span>Opp</span>
+                      <span>AB</span>
+                      <span>H</span>
+                      <span>R</span>
+                      <span>RBI</span>
+                      <span>HR</span>
+                    </div>
+                    {analysis.hitter.recentGames.map((game) => (
+                      <div
+                        key={`${game.gamePk ?? game.date}-${game.opponent ?? "opp"}`}
+                        className="recent-game-row"
+                      >
+                        <span>{formatShortDate(game.date)}</span>
+                        <span>{game.opponent ?? "MLB"}</span>
+                        <strong>{game.atBats}</strong>
+                        <strong>{game.hits}</strong>
+                        <strong>{game.runs}</strong>
+                        <strong>{game.rbi}</strong>
+                        <strong>{game.homeRuns}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="recent-game-empty">
+                    <strong>No recent game log available.</strong>
+                    <span>The model kept the last-5 game adjustment neutral.</span>
+                  </div>
+                )}
               </div>
             </div>
 

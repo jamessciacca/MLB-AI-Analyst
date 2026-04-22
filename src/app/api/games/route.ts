@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getGamesByDate, getVenueById } from "@/lib/mlb";
+import { getGameLineupStatus, getGamesByDate, getVenueById } from "@/lib/mlb";
 import { todayIsoDate } from "@/lib/utils";
 import { getGameWeather } from "@/lib/weather";
 
@@ -16,16 +16,28 @@ export async function GET(request: Request) {
     const gamesWithWeather = await Promise.all(
       games.map(async (game) => {
         try {
-          const venue = await getVenueById(game.venue.id, season);
+          const [venue, lineupStatus] = await Promise.all([
+            getVenueById(game.venue.id, season),
+            getGameLineupStatus(game.gamePk),
+          ]);
           const weather = await getGameWeather(venue, game.gameDate);
 
           return {
             ...game,
+            lineupStatus,
             weather,
           };
         } catch {
           return {
             ...game,
+            lineupStatus: {
+              status: "pending",
+              homeCount: 0,
+              awayCount: 0,
+              totalCount: 0,
+              homePlayers: [],
+              awayPlayers: [],
+            },
             weather: null,
           };
         }

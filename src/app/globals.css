@@ -130,10 +130,10 @@ a {
   left: 1rem;
   z-index: 40;
   display: grid;
-  gap: 0.85rem;
-  width: min(15.5rem, calc(100vw - 2rem));
-  max-height: min(32rem, calc(100vh - 2rem));
-  padding: 1rem;
+  gap: 1rem;
+  width: min(25rem, calc(100vw - 2rem));
+  max-height: min(46rem, calc(100vh - 2rem));
+  padding: 1.35rem;
   border: 1px solid var(--line);
   border-radius: 22px;
   background: linear-gradient(180deg, var(--panel), var(--panel-command-2));
@@ -152,6 +152,7 @@ a {
   display: block;
   margin-top: 0.18rem;
   color: var(--accent-text);
+  font-size: 1.3rem;
 }
 
 .parlay-clear-button,
@@ -171,13 +172,13 @@ a {
 }
 
 .parlay-clear-button {
-  padding: 0.45rem 0.65rem;
+  padding: 0.55rem 0.8rem;
 }
 
 .parlay-list {
   display: grid;
-  gap: 0.55rem;
-  max-height: 22rem;
+  gap: 0.9rem;
+  max-height: 28rem;
   margin: 0;
   padding: 0 0.15rem 0 0;
   overflow: auto;
@@ -187,9 +188,9 @@ a {
 .parlay-list li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.55rem;
+  gap: 1rem;
   align-items: center;
-  padding: 0.65rem 0.7rem;
+  padding: 1rem;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--panel-raised);
@@ -203,6 +204,7 @@ a {
 .parlay-list strong {
   overflow: hidden;
   color: var(--ink);
+  font-size: 1.08rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -210,17 +212,183 @@ a {
 .parlay-list span,
 .parlay-empty {
   color: var(--muted);
-  font-size: 0.9rem;
-  line-height: 1.45;
+  font-size: 1rem;
+  line-height: 1.5;
 }
 
 .parlay-list button {
-  width: 1.8rem;
-  height: 1.8rem;
+  width: 2.35rem;
+  height: 2.35rem;
 }
 
 .parlay-empty {
   margin: 0;
+}
+
+.parlay-payout-card {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-raised);
+}
+
+.parlay-payout-card label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.parlay-payout-card input {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 0.7rem 0.8rem;
+  background: var(--panel-raised-2);
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.parlay-payout-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.parlay-payout-grid > span {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised-2);
+}
+
+.parlay-payout-grid strong {
+  color: var(--accent-text);
+  font-size: 1.08rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.parlay-payout-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.analysis-chatbot {
+  position: fixed;
+  top: 50%;
+  right: 1rem;
+  z-index: 39;
+  display: grid;
+  gap: 0.9rem;
+  width: min(25rem, calc(100vw - 2rem));
+  max-height: min(46rem, calc(100vh - 2rem));
+  padding: 1.35rem;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: linear-gradient(180deg, var(--panel), var(--panel-command-2));
+  box-shadow: var(--shadow-strong);
+  transform: translateY(-50%);
+}
+
+.analysis-chatbot-header {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.analysis-chatbot-header strong {
+  display: block;
+  margin-top: 0.18rem;
+  color: var(--accent-text);
+  font-size: 1.12rem;
+  line-height: 1.15;
+}
+
+.analysis-chat-clear,
+.analysis-chat-form button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  color: var(--ink);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.analysis-chat-clear {
+  padding: 0.55rem 0.8rem;
+}
+
+.analysis-chat-messages {
+  display: grid;
+  gap: 0.65rem;
+  max-height: 25rem;
+  overflow: auto;
+  padding-right: 0.15rem;
+}
+
+.analysis-chat-empty,
+.analysis-chat-message {
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-raised);
+  color: var(--ink);
+  line-height: 1.42;
+}
+
+.analysis-chat-empty {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.analysis-chat-empty strong {
+  color: var(--accent-text);
+}
+
+.analysis-chat-empty span {
+  color: var(--muted);
+}
+
+.analysis-chat-message.user {
+  border-color: rgba(191, 13, 62, 0.32);
+  background: var(--suggestion-hover);
+}
+
+.analysis-chat-message.assistant {
+  color: var(--muted);
+}
+
+.analysis-chat-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.analysis-chat-form textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  padding: 0.8rem;
+  background: var(--panel-raised-2);
+  color: var(--ink);
+}
+
+.analysis-chat-form button {
+  justify-self: end;
+  padding: 0.6rem 1rem;
+}
+
+.analysis-chat-form button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .hero {
@@ -534,6 +702,66 @@ a {
   letter-spacing: -0.02em;
 }
 
+.schedule-title-row {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.schedule-date-picker {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.schedule-date-trigger {
+  display: inline-flex;
+  min-width: 10rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.55rem 0.75rem;
+  background: var(--panel-raised);
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.schedule-date-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 60;
+  display: grid;
+  width: min(12rem, calc(100vw - 2rem));
+  gap: 0.3rem;
+  padding: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow-strong);
+}
+
+.schedule-date-option {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+.schedule-date-option:hover,
+.schedule-date-option.selected {
+  background: var(--suggestion-hover);
+  color: var(--accent-text);
+}
+
 .schedule-count {
   flex: 0 0 auto;
   padding: 0.55rem 0.8rem;
@@ -702,6 +930,35 @@ a {
   font-size: 0.9rem;
 }
 
+.final-score-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.final-score-strip span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-raised);
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.final-score-strip .winner {
+  border-color: rgba(13, 141, 89, 0.32);
+  background: rgba(13, 141, 89, 0.12);
+  color: var(--positive);
+}
+
+.final-score-strip .loser {
+  opacity: 0.78;
+}
+
 .schedule-weather-row {
   display: flex;
   gap: 0.6rem;
@@ -722,6 +979,95 @@ a {
   background: var(--panel-raised);
   color: var(--accent-text);
   font-weight: 900;
+}
+
+.lineup-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.4rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-raised);
+  color: var(--muted);
+  text-align: center;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.lineup-strip:disabled {
+  cursor: default;
+}
+
+.lineup-chip-released {
+  border-color: rgba(13, 141, 89, 0.3);
+  background: rgba(13, 141, 89, 0.12);
+  color: var(--positive);
+}
+
+.lineup-chip-partial {
+  border-color: rgba(154, 106, 19, 0.3);
+  background: rgba(154, 106, 19, 0.12);
+  color: var(--neutral);
+}
+
+.lineup-chip-pending {
+  color: var(--muted);
+}
+
+.lineup-preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-raised);
+  cursor: default;
+}
+
+.lineup-preview > div {
+  min-width: 0;
+}
+
+.lineup-preview > div > strong {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--accent-text);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+
+.lineup-preview ol {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lineup-preview li {
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
+  gap: 0.35rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.lineup-preview li span:first-child {
+  color: var(--accent-text);
+  font-weight: 900;
+}
+
+.lineup-preview li span:nth-child(2) {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .probables-row {
@@ -1117,6 +1463,10 @@ a {
 }
 
 .summary-lead {
+  grid-column: span 7;
+}
+
+.summary-lead {
   position: relative;
   overflow: hidden;
   padding-right: 11rem;
@@ -1217,6 +1567,7 @@ a {
 }
 
 .summary-notes {
+  grid-column: span 5;
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -1224,13 +1575,14 @@ a {
 
 .stat-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.9rem;
+  grid-template-columns: repeat(auto-fit, minmax(6.7rem, 1fr));
+  gap: 0.65rem;
   margin-top: 1rem;
 }
 
 .stat-box {
-  padding: 0.95rem;
+  min-width: 0;
+  padding: 0.8rem;
   border-radius: 20px;
   background: rgba(217, 225, 234, 0.08);
   border: 1px solid rgba(217, 225, 234, 0.08);
@@ -1245,8 +1597,53 @@ a {
 .stat-box strong {
   display: block;
   margin-top: 0.25rem;
-  font-size: 1.28rem;
-  line-height: 1.05;
+  font-size: 1.08rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.odds-stat-box {
+  align-content: center;
+  grid-column: span 2;
+  padding-inline: 1rem;
+}
+
+.odds-stat-box strong {
+  font-size: 1.22rem;
+}
+
+.manual-odds-entry {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.85rem;
+  padding: 0.8rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  background: var(--panel-raised-2);
+}
+
+.manual-odds-entry > div {
+  display: grid;
+  grid-template-columns: minmax(6rem, 8rem) minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.manual-odds-entry input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.6rem 0.7rem;
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.manual-odds-entry span {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
 }
 
 .factor-grid,
@@ -1298,6 +1695,17 @@ a {
   transform: none;
 }
 
+.comparison-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.comparison-card-actions .compact-add-button {
+  margin-block: 0.65rem 0.2rem;
+}
+
 .matchup-history-card {
   grid-column: span 6;
   border-top: 4px solid rgba(13, 141, 89, 0.78);
@@ -1305,6 +1713,11 @@ a {
 
 .top-matchup-history {
   grid-column: span 12;
+}
+
+.recent-form-card {
+  grid-column: span 12;
+  border-top: 4px solid rgba(0, 45, 114, 0.78);
 }
 
 .matchup-history-list {
@@ -1341,6 +1754,73 @@ a {
   line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.recent-game-table {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.85rem;
+}
+
+.recent-game-row {
+  display: grid;
+  grid-template-columns: minmax(5.25rem, 1.2fr) minmax(4rem, 1fr) repeat(5, minmax(2.5rem, 0.65fr));
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised-2);
+}
+
+.recent-game-row span,
+.recent-game-row strong,
+.recent-game-empty span,
+.recent-game-empty strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-game-row span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.recent-game-row strong {
+  color: var(--accent-text);
+  font-size: 0.98rem;
+}
+
+.recent-game-header {
+  background: transparent;
+}
+
+.recent-game-header span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.recent-game-empty {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.85rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised-2);
+}
+
+.recent-game-empty strong {
+  color: var(--accent-text);
+}
+
+.recent-game-empty span {
+  color: var(--muted);
 }
 
 .factor-impact-positive {
@@ -1407,6 +1887,7 @@ a {
   position: relative;
   display: grid;
   align-content: center;
+  justify-items: center;
   gap: 0.75rem;
   flex: 1;
   margin-top: 0.95rem;
@@ -1420,6 +1901,8 @@ a {
 .previous-result-box strong,
 .previous-result-box span {
   display: block;
+  max-width: 100%;
+  text-align: center;
 }
 
 .previous-result-box strong {
@@ -1520,9 +2003,9 @@ a {
   }
 }
 
-@media (max-width: 2180px) {
+@media (max-width: 1600px) {
   .shell {
-    padding-bottom: 18rem;
+    padding-bottom: 34rem;
   }
 
   .parlay-builder {
@@ -1533,6 +2016,20 @@ a {
     width: auto;
     max-height: 15rem;
     transform: none;
+  }
+
+  .analysis-chatbot {
+    top: auto;
+    right: 1rem;
+    bottom: 17rem;
+    left: 1rem;
+    width: auto;
+    max-height: 16rem;
+    transform: none;
+  }
+
+  .analysis-chat-messages {
+    max-height: 7rem;
   }
 
   .parlay-list {
@@ -1757,7 +2254,24 @@ a {
   }
 
   .stat-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(11rem, 1.8fr);
+  }
+
+  .stat-box {
+    padding: 0.62rem;
+    border-radius: 16px;
+  }
+
+  .stat-box strong {
+    font-size: 0.95rem;
+  }
+
+  .odds-stat-box {
+    padding-inline: 0.75rem;
+  }
+
+  .odds-stat-box strong {
+    font-size: 1.05rem;
   }
 
   .matchup-history-list {
@@ -1839,18 +2353,30 @@ a {
   .schedule-count {
     font-size: 0.75rem;
   }
+
+  .manual-odds-entry > div {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 720px) {
   .shell {
     width: min(100vw - 1rem, 1220px);
     padding-top: 1.2rem;
-    padding-bottom: 16rem;
+    padding-bottom: 32rem;
   }
 
   .parlay-builder {
     right: 0.5rem;
     bottom: 0.5rem;
+    left: 0.5rem;
+    max-height: 14.5rem;
+    padding: 0.85rem;
+  }
+
+  .analysis-chatbot {
+    right: 0.5rem;
+    bottom: 15.75rem;
     left: 0.5rem;
     max-height: 14.5rem;
     padding: 0.85rem;
@@ -1900,7 +2426,11 @@ a {
   }
 
   .stat-strip {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .odds-stat-box {
+    grid-column: 1 / -1;
   }
 
   .player-result-heading {
@@ -1922,6 +2452,10 @@ a {
 
   .probables-row span:last-child {
     text-align: left;
+  }
+
+  .lineup-preview {
+    grid-template-columns: 1fr;
   }
 
   .primary-button,
@@ -1968,6 +2502,12 @@ a {
     font-size: 1.28rem;
   }
 
+  .schedule-date-picker,
+  .schedule-date-trigger,
+  .schedule-date-menu {
+    width: 100%;
+  }
+
   .panel h3 {
     font-size: 1rem;
   }
@@ -1978,12 +2518,24 @@ a {
     padding: 0.78rem 0.85rem;
   }
 
+  .stat-strip {
+    grid-template-columns: 1fr;
+  }
+
   .parlay-builder {
+    max-height: 13.5rem;
+  }
+
+  .analysis-chatbot {
     max-height: 13.5rem;
   }
 
   .parlay-list {
     max-height: 6.5rem;
+  }
+
+  .analysis-chat-messages {
+    max-height: 5.5rem;
   }
 
   .matchup-row {

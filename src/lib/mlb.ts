@@ -1,8 +1,11 @@
 import { remember } from "@/lib/cache";
 import {
+  type BatterRecentGameLine,
   type FieldingStatLine,
   type GameSummary,
   type HittingStatLine,
+  type LineupCardPlayer,
+  type LineupStatus,
   type PitchingStatLine,
   type PlayerSearchResult,
   type StartingLineupPlayer,
@@ -357,6 +360,8 @@ export async function getGamesByDate(
         name: awayTeam?.name ?? "Unknown Team",
         abbreviation: awayTeam?.abbreviation ?? "UNK",
       },
+      homeScore: asNumber(homeData?.score),
+      awayScore: asNumber(awayData?.score),
       homeProbablePitcher: mapProbablePitcher(homeData?.probablePitcher),
       awayProbablePitcher: mapProbablePitcher(awayData?.probablePitcher),
     };
@@ -501,6 +506,8 @@ async function getGamesFromGamePk(
         name: teamDirectory.get(awayTeamId)?.name ?? "Unknown Team",
         abbreviation: teamDirectory.get(awayTeamId)?.abbreviation ?? "UNK",
       },
+      homeScore: asNumber(homeData.score),
+      awayScore: asNumber(awayData.score),
       homeProbablePitcher: mapProbablePitcher(homeData.probablePitcher),
       awayProbablePitcher: mapProbablePitcher(awayData.probablePitcher),
     };
@@ -574,6 +581,46 @@ export async function getPlayerHittingStats(
 
   const stat = extractStatSplit(json);
   return stat ? parseHittingStatLine(stat) : null;
+}
+
+export async function getPlayerRecentBattingGameLog(
+  playerId: number,
+  season = currentSeason(),
+  limit = 5,
+): Promise<BatterRecentGameLine[]> {
+  const json = await mlbJson<Record<string, unknown>>(
+    `people/${playerId}/stats`,
+    {
+      stats: "gameLog",
+      group: "hitting",
+      season,
+      gameType: "R",
+    },
+    HALF_HOUR_MS,
+  );
+  const stats = json.stats as Array<Record<string, unknown>> | undefined;
+  const splits = stats?.[0]?.splits as Array<Record<string, unknown>> | undefined;
+
+  return (splits ?? [])
+    .map((split): BatterRecentGameLine => {
+      const stat = (split.stat as Record<string, unknown> | undefined) ?? {};
+      const game = (split.game as Record<string, unknown> | undefined) ?? {};
+      const opponent = split.opponent as Record<string, unknown> | undefined;
+
+      return {
+        gamePk: asNumber(game.gamePk),
+        date: asString(split.date) ?? "",
+        opponent: asString(opponent?.abbreviation) ?? asString(opponent?.name),
+        atBats: asNumber(stat.atBats) ?? 0,
+        runs: asNumber(stat.runs) ?? 0,
+        hits: asNumber(stat.hits) ?? 0,
+        rbi: asNumber(stat.rbi) ?? 0,
+        homeRuns: asNumber(stat.homeRuns) ?? 0,
+      };
+    })
+    .filter((line) => line.date)
+    .sort((left, right) => right.date.localeCompare(left.date))
+    .slice(0, limit);
 }
 
 export async function getPlayerPitchingStats(
@@ -789,4 +836,98 @@ export async function getStartingLineupPlayers(
 
     return (left.lineupSlot ?? 99) - (right.lineupSlot ?? 99);
   });
+}
+
+export async function getGameLineupStatus(gamePk: number): Promise<{
+  status: LineupStatus;
+  homeCount: number;
+  awayCount: number;
+  totalCount: number;
+  homePlayers: LineupCardPlayer[];
+  awayPlayers: LineupCardPlayer[];
+}> {
+  try {
+    const json = await mlbFeedJson<Record<string, unknown>>(
+      `game/${gamePk}/feed/live`,
+      LIVE_GAME_TTL_MS,
+    );
+    const teams = (
+      ((json.liveData as Record<string, unknown> | undefined)?.boxscore as
+        | Record<string, unknown>
+        | undefined)?.teams as Record<string, unknown> | undefined
+    ) ?? { home: {}, away: {} };
+
+    function getLineupPlayers(side: "home" | "away") {
+      const teamBoxscore = teams[side] as Record<string, unknown> | undefined;
+      const players = teamBoxscore?.players as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+
+      if (!players) {
+        return [];
+      }
+
+      return Object.values(players)
+        .flatMap((candidate): LineupCardPlayer[] => {
+          const battingOrder = asString(candidate.battingOrder);
+          const positionAbbreviation = asString(
+            (candidate.position as Record<string, unknown> | undefined)?.abbreviation,
+          );
+          const person = candidate.person as Record<string, unknown> | undefined;
+          const playerId = asNumber(person?.id);
+          const fullName = asString(person?.fullName);
+          const batSide =
+            asString((person?.batSide as Record<string, unknown> | undefined)?.code) ?? null;
+          const lineupSlot = battingOrder ? Number(battingOrder[0]) : null;
+
+          if (!battingOrder || !playerId || !fullName || positionAbbreviation === "P") {
+            return [];
+          }
+
+          return [
+            {
+              id: playerId,
+              fullName,
+              lineupSlot:
+                lineupSlot && Number.isFinite(lineupSlot)
+                  ? Math.max(1, Math.min(9, lineupSlot))
+                  : null,
+              primaryPosition: positionAbbreviation ?? null,
+              batSide,
+            },
+          ];
+        })
+        .sort((left, right) => (left.lineupSlot ?? 99) - (right.lineupSlot ?? 99));
+    }
+
+    const homePlayers = getLineupPlayers("home");
+    const awayPlayers = getLineupPlayers("away");
+    const homeCount = homePlayers.length;
+    const awayCount = awayPlayers.length;
+    const totalCount = homeCount + awayCount;
+    const status: LineupStatus =
+      homeCount >= 9 && awayCount >= 9
+        ? "released"
+        : totalCount > 0
+          ? "partial"
+          : "pending";
+
+    return {
+      status,
+      homeCount,
+      awayCount,
+      totalCount,
+      homePlayers,
+      awayPlayers,
+    };
+  } catch {
+    return {
+      status: "pending",
+      homeCount: 0,
+      awayCount: 0,
+      totalCount: 0,
+      homePlayers: [],
+      awayPlayers: [],
+    };
+  }
 }

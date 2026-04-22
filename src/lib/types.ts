@@ -3,6 +3,7 @@ export type ConfidenceLevel = "low" | "medium" | "high";
 export type Recommendation = "good play" | "neutral" | "avoid";
 export type AnalysisMarket = "hit" | "home_run";
 export type WeatherCondition = "sunny" | "cloudy" | "rainy" | "unknown";
+export type LineupStatus = "released" | "partial" | "pending";
 
 export interface TeamDirectoryEntry {
   id: number;
@@ -43,6 +44,8 @@ export interface GameSummary {
   };
   homeTeam: TeamGameInfo;
   awayTeam: TeamGameInfo;
+  homeScore: number | null;
+  awayScore: number | null;
   homeProbablePitcher: {
     id: number;
     fullName: string;
@@ -53,7 +56,23 @@ export interface GameSummary {
     fullName: string;
     pitchHand: string | null;
   } | null;
+  lineupStatus?: {
+    status: LineupStatus;
+    homeCount: number;
+    awayCount: number;
+    totalCount: number;
+    homePlayers: LineupCardPlayer[];
+    awayPlayers: LineupCardPlayer[];
+  };
   weather?: WeatherSnapshot | null;
+}
+
+export interface LineupCardPlayer {
+  id: number;
+  fullName: string;
+  lineupSlot: number | null;
+  primaryPosition: string | null;
+  batSide: string | null;
 }
 
 export interface HittingStatLine {
@@ -69,6 +88,17 @@ export interface HittingStatLine {
   strikeOuts: number | null;
   baseOnBalls: number | null;
   babip: number | null;
+}
+
+export interface BatterRecentGameLine {
+  gamePk: number | null;
+  date: string;
+  opponent: string | null;
+  atBats: number;
+  runs: number;
+  hits: number;
+  rbi: number;
+  homeRuns: number;
 }
 
 export interface PitchingStatLine {
@@ -203,6 +233,8 @@ export interface AnalysisResult {
   probabilities: {
     perAtBat: number;
     atLeastOne: number;
+    atLeastTwo: number | null;
+    expectedHits: number | null;
     expectedAtBats: number;
   };
   hitter: {
@@ -213,6 +245,7 @@ export interface AnalysisResult {
     priorExpected: ExpectedStatsLine | null;
     sprint: SprintSpeedLine | null;
     lineupSlot: number | null;
+    recentGames: BatterRecentGameLine[];
   };
   pitcher: {
     player: PlayerSearchResult | null;
@@ -233,7 +266,21 @@ export interface AnalysisResult {
   summary: string;
   aiSummary: string | null;
   previousModelResult?: PreviousModelResult | null;
+  odds?: PlayerOddsSnapshot | null;
   batterVsPitcher: BatterVsPitcherSummary | null;
+}
+
+export interface PlayerOddsSnapshot {
+  status: "available" | "disabled" | "not_found" | "error";
+  bookmaker: "DraftKings";
+  market: AnalysisMarket;
+  marketName: string | null;
+  eventId: number | null;
+  line: number | null;
+  over: string | null;
+  under: string | null;
+  updatedAt: string | null;
+  message: string;
 }
 
 export interface BatterVsPitcherSummary {
@@ -292,6 +339,7 @@ export interface AnalysisModelInput {
     sprint: SprintSpeedLine | null;
     lineupSlot: number | null;
     events: StatcastEventRow[];
+    recentGames: BatterRecentGameLine[];
   };
   pitcher: {
     player: PlayerSearchResult | null;
