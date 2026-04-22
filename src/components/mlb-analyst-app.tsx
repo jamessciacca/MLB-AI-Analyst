@@ -14,6 +14,7 @@ import {
   type AnalysisMarket,
   type AnalysisResult,
   type GameSummary,
+  type GameWinPredictionResult,
   type LineupComparisonResult,
   type PlayerSearchResult,
 } from "@/lib/types";
@@ -28,30 +29,32 @@ type GamesResponse = {
   error?: string;
 };
 
+type GameWinPredictionResponse = GameWinPredictionResult & { error?: string };
+
 type FeedbackRating = "correct" | "too_high" | "too_low";
 type ColorTheme = "light" | "dark";
 
-type ParlayPlayer = {
-  id: number;
+type ParlayLeg = {
+  id: string;
   name: string;
   batSide: string | null;
   team: string | null;
-  market: AnalysisMarket | null;
+  label: string;
   probability: number | null;
-  odds: {
-    line: number | null;
-    over: string | null;
-  } | null;
-};
-
-type ManualOdds = Record<string, string>;
-type AnalysisChatMessage = {
-  role: "user" | "assistant";
-  content: string;
 };
 
 const THEME_STORAGE_KEY = "mlb-analyst-theme";
 const THEME_CHANGE_EVENT = "mlb-analyst-theme-change";
+const PARLAY_FLOATING_BREAKPOINT_QUERY = "(max-width: 1600px)";
+const SCHEDULE_REFRESH_MS = 2 * 60 * 1000;
+
+function getInitialParlayCollapsed() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.matchMedia(PARLAY_FLOATING_BREAKPOINT_QUERY).matches;
+}
 
 function getStoredTheme(): ColorTheme {
   if (typeof window === "undefined") {
@@ -89,6 +92,35 @@ function formatOptionalNumber(value: number | null | undefined, digits = 1) {
   return value.toFixed(digits);
 }
 
+function formatOptionalTemperature(value: number | null | undefined) {
+  return value === null || value === undefined ? "Weather n/a" : `${value.toFixed(0)}F`;
+}
+
+function getExternalBadges(
+  externalContext: GameWinPredictionResult["externalContext"] | AnalysisResult["externalContext"],
+) {
+  if (!externalContext) {
+    return ["External context unavailable"];
+  }
+
+  return [
+    externalContext.weather
+      ? `${formatOptionalTemperature(externalContext.weather.temperatureF)} weather`
+      : "Weather n/a",
+    externalContext.daylight?.isTwilightStart
+      ? "Twilight start"
+      : externalContext.daylight?.isDayGame
+        ? "Day start"
+        : externalContext.daylight?.isNightGame
+          ? "Night start"
+          : "Daylight n/a",
+    externalContext.odds?.marketImpliedHomeWinProb
+      ? `Market home ${formatPercent(externalContext.odds.marketImpliedHomeWinProb)}`
+      : "Market n/a",
+    `Enrichment ${(externalContext.features.externalDataCompletenessScore * 100).toFixed(0)}%`,
+  ];
+}
+
 function formatShortDate(date: string) {
   const parsed = new Date(`${date}T12:00:00`);
 
@@ -106,76 +138,6 @@ function getMarketLabel(market: AnalysisMarket) {
   return market === "home_run" ? "Home Run" : "Hit";
 }
 
-function formatAmericanOdds(decimalValue: string | null | undefined) {
-  const decimalOdds = parseDecimalOdds(decimalValue);
-
-  if (decimalOdds === null) {
-    return "n/a";
-  }
-
-  if (decimalOdds >= 2) {
-    return `+${Math.round((decimalOdds - 1) * 100)}`;
-  }
-
-  return `-${Math.round(100 / (decimalOdds - 1))}`;
-}
-
-function getOddsMarketText(market: AnalysisMarket) {
-  return market === "home_run" ? "Home Run" : "1+ Hits";
-}
-
-function formatDraftKingsOdds(analysis: AnalysisResult) {
-  const odds = analysis.odds;
-
-  if (!odds || odds.status === "disabled") {
-    return "Not configured";
-  }
-
-  if (odds.status !== "available") {
-    return "Not posted";
-  }
-
-  return `${getOddsMarketText(analysis.market)} ${formatAmericanOdds(odds.over)}`;
-}
-
-function parseDecimalOdds(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) && parsed > 1 ? parsed : null;
-}
-
-function americanOddsToDecimal(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const normalized = value.trim().replace(/^\+/, "");
-  const american = Number.parseInt(normalized, 10);
-
-  if (!Number.isFinite(american) || american === 0) {
-    return null;
-  }
-
-  if (american > 0) {
-    return (american / 100 + 1).toFixed(2);
-  }
-
-  return (100 / Math.abs(american) + 1).toFixed(2);
-}
-
-function getManualOddsKey(result: AnalysisResult) {
-  return `${result.hitter.player.id}:${result.game.gamePk}:${result.market}`;
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(value);
-}
 
 function getPitchHandLabel(hand: string | null | undefined) {
   if (hand === "L") {
@@ -276,9 +238,29 @@ function canShowLineup(game: GameSummary) {
   return (game.lineupStatus?.totalCount ?? 0) > 0;
 }
 
-function isFinalGame(game: GameSummary) {
+function isInProgressGame(game: GameSummary) {
   const status = game.status.toLowerCase();
-  return status.includes("final") || status.includes("game over") || status.includes("completed");
+
+  return (
+    status.includes("progress") ||
+    status.includes("live") ||
+    status.includes("warmup") ||
+    status.includes("delayed") ||
+    status.includes("suspended") ||
+    status.includes("top ") ||
+    status.includes("bottom ") ||
+    status.includes("middle ") ||
+    status.includes("end ")
+  );
+}
+
+function hasGameScore(game: GameSummary) {
+  return (
+    game.homeScore !== null &&
+    game.homeScore !== undefined &&
+    game.awayScore !== null &&
+    game.awayScore !== undefined
+  );
 }
 
 function getGameWinner(game: GameSummary) {
@@ -301,6 +283,99 @@ function buildTeamLogoUrl(teamId: number) {
 
 function buildPlayerHeadshotUrl(playerId: number) {
   return `https://img.mlbstatic.com/mlb-photos/image/upload/w_220,h_220,c_pad,b_auto,q_auto:best/v1/people/${playerId}/headshot/67/current`;
+}
+
+function getAnalysisTone(result: Pick<AnalysisResult, "recommendation">) {
+  return result.recommendation === "good play"
+    ? "positive"
+    : result.recommendation === "avoid"
+      ? "negative"
+      : "neutral";
+}
+
+function buildPlayerCardReason(result: AnalysisResult) {
+  const pitcherName = result.pitcher.player?.fullName ?? "the listed probable pitcher";
+  const chanceText =
+    result.recommendation === "good play"
+      ? "The model sees this as one of the better bats on the board."
+      : result.recommendation === "avoid"
+        ? "The model is cautious here and does not see enough support for the play."
+        : "The model sees a playable but not standout setup.";
+  const lineupText = result.hitter.lineupSlot
+    ? `He is projected to hit from the ${result.hitter.lineupSlot} spot, which shapes how many chances he should get.`
+    : "The lineup spot is not fully confirmed, so the model is less aggressive.";
+  const pitcherText = result.pitcher.player
+    ? `It compares his bat profile against ${pitcherName}'s handedness, contact allowed, and pitch mix.`
+    : "The opposing starter is not fully confirmed, so the pitcher part of the read is more conservative.";
+  const recentFactor = result.factors.find((factor) => factor.label === "Last 5 games");
+  const recentText =
+    recentFactor?.impact === "positive"
+      ? "Recent form is helping the projection."
+      : recentFactor?.impact === "negative"
+        ? "Recent form is holding the projection down a bit."
+        : "Recent form is treated as mostly neutral.";
+
+  return `${chanceText} ${lineupText} ${pitcherText} ${recentText}`;
+}
+
+function getPlainFactorDetail(factor: AnalysisResult["factors"][number]) {
+  if (factor.label === "ML model") {
+    return "The trained model blended the matchup signals and produced the final probability.";
+  }
+  if (factor.label === "Hitter baseline" || factor.label === "Power baseline") {
+    return factor.impact === "positive"
+      ? "The hitter's usual profile is stronger than an average player for this outcome."
+      : factor.impact === "negative"
+        ? "The hitter's usual profile is weaker than an average player for this outcome."
+        : "The hitter's baseline looks close to league average.";
+  }
+  if (factor.label.includes("Pitcher")) {
+    return factor.impact === "positive"
+      ? "The opposing pitcher gives this hitter a matchup boost."
+      : factor.impact === "negative"
+        ? "The opposing pitcher makes this matchup tougher."
+        : "The pitcher matchup is close to neutral.";
+  }
+  if (factor.label === "Pitch mix fit") {
+    return factor.impact === "positive"
+      ? "The hitter matches up well with the pitches he is likely to see."
+      : factor.impact === "negative"
+        ? "The pitch mix creates some risk for this hitter."
+        : "The pitch mix does not strongly move the projection.";
+  }
+  if (factor.label === "Last 5 games") {
+    return factor.impact === "positive"
+      ? "Recent games are helping the read."
+      : factor.impact === "negative"
+        ? "Recent games are dragging the read down."
+        : "Recent games are not changing the read much.";
+  }
+  if (factor.label === "Projected chances") {
+    return "Lineup spot and game context estimate how many times he should come to the plate.";
+  }
+
+  return factor.impact === "positive"
+    ? "This part of the matchup helps the projection."
+    : factor.impact === "negative"
+      ? "This part of the matchup hurts the projection."
+      : "This part of the matchup is mostly neutral.";
+}
+
+function formatConfidenceLabel(confidence: string) {
+  return `${confidence.charAt(0).toUpperCase()}${confidence.slice(1)} Confidence`;
+}
+
+function ConfidenceLabel({ confidence }: { confidence: string }) {
+  return (
+    <span
+      className="confidence-label"
+      tabIndex={0}
+      title="This is the model's confidence in the reliability of its projection, not certainty that the player will get a hit, hit a home run, or that the team will win."
+      aria-label={`${formatConfidenceLabel(confidence)}. This is the model's confidence in the reliability of its projection, not certainty that the outcome will happen.`}
+    >
+      {formatConfidenceLabel(confidence)}
+    </span>
+  );
 }
 
 function formatGameTime(gameDate: string) {
@@ -355,6 +430,18 @@ function formatScheduleOptionDate(date: string) {
   }).format(parsed);
 }
 
+function formatRefreshTime(value: string | null) {
+  if (!value) {
+    return "not refreshed yet";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
 function getPreviousResultLabel(
   rating: NonNullable<AnalysisResult["previousModelResult"]>["rating"],
 ) {
@@ -394,6 +481,7 @@ function getPreviousResultMarker(
 export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const resultsRef = useRef<HTMLElement | null>(null);
   const analysisDetailRef = useRef<HTMLDivElement | null>(null);
+  const skipNextResultsScrollRef = useRef(false);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [players, setPlayers] = useState<PlayerSearchResult[]>([]);
@@ -402,17 +490,28 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const [selectedDate, setSelectedDate] = useState(defaultDate);
   const [selectedMarket, setSelectedMarket] = useState<AnalysisMarket>("hit");
   const [games, setGames] = useState<GameSummary[]>([]);
+  const [scheduleUpdatedAt, setScheduleUpdatedAt] = useState<string | null>(null);
   const [selectedGamePk, setSelectedGamePk] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [lineupDetailAnalysis, setLineupDetailAnalysis] =
+    useState<AnalysisResult | null>(null);
   const [lineupComparison, setLineupComparison] = useState<LineupComparisonResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isComparingLineup, setIsComparingLineup] = useState(false);
+  const [gameWinnerLoadingPk, setGameWinnerLoadingPk] = useState<number | null>(null);
+  const [gameWinPredictions, setGameWinPredictions] = useState<
+    Record<number, GameWinPredictionResult>
+  >({});
+  const [selectedGameWinPrediction, setSelectedGameWinPrediction] =
+    useState<GameWinPredictionResult | null>(null);
   const [detailLoadingPlayerId, setDetailLoadingPlayerId] = useState<number | null>(null);
+  const [pendingDetailScrollId, setPendingDetailScrollId] = useState<string | null>(null);
   const [isAuditingOutcomes, setIsAuditingOutcomes] = useState(false);
   const [showModelDetails, setShowModelDetails] = useState(false);
   const [showScheduleMenu, setShowScheduleMenu] = useState(false);
+  const [showScheduleOverlay, setShowScheduleOverlay] = useState(false);
   const [showScheduleDateMenu, setShowScheduleDateMenu] = useState(false);
   const [expandedLineupGamePk, setExpandedLineupGamePk] = useState<number | null>(null);
   const colorTheme = useSyncExternalStore(
@@ -422,39 +521,29 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   );
   const [lineupComparisonMarket, setLineupComparisonMarket] =
     useState<AnalysisMarket | null>(null);
-  const [parlayPlayers, setParlayPlayers] = useState<ParlayPlayer[]>([]);
-  const [parlayStake, setParlayStake] = useState("10");
-  const [manualOdds, setManualOdds] = useState<ManualOdds>({});
-  const [analysisChatMessages, setAnalysisChatMessages] = useState<AnalysisChatMessage[]>([]);
-  const [analysisChatInput, setAnalysisChatInput] = useState("");
-  const [isAnalysisChatLoading, setIsAnalysisChatLoading] = useState(false);
+  const [parlayPlayers, setParlayPlayers] = useState<ParlayLeg[]>([]);
+  const [isParlayCollapsed, setIsParlayCollapsed] = useState(getInitialParlayCollapsed);
   const [feedbackNote, setFeedbackNote] = useState("");
   const [feedbackImage, setFeedbackImage] = useState<File | null>(null);
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
   const analysisId = analysis?.analysisId ?? null;
   const lineupComparisonId = lineupComparison?.generatedAt ?? null;
-  const hasResults = Boolean(analysisId || lineupComparison?.topPick);
-  const parlayStakeValue = Number.parseFloat(parlayStake);
-  const normalizedParlayStake =
-    Number.isFinite(parlayStakeValue) && parlayStakeValue > 0 ? parlayStakeValue : 0;
-  const parlayLegOdds = parlayPlayers
-    .map((player) => parseDecimalOdds(player.odds?.over))
-    .filter((value): value is number => value !== null);
-  const missingParlayOdds = parlayPlayers.length - parlayLegOdds.length;
-  const combinedParlayOdds =
-    parlayLegOdds.length > 0
-      ? parlayLegOdds.reduce((product, odds) => product * odds, 1)
-      : null;
-  const parlayPayout =
-    combinedParlayOdds !== null && missingParlayOdds === 0
-      ? normalizedParlayStake * combinedParlayOdds
-      : null;
-  const parlayProfit =
-    parlayPayout !== null ? parlayPayout - normalizedParlayStake : null;
+  const hasResults = Boolean(analysisId || lineupComparison?.topPick || selectedGameWinPrediction);
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
   }, [colorTheme]);
+
+  useEffect(() => {
+    const floatingParlayQuery = window.matchMedia(PARLAY_FLOATING_BREAKPOINT_QUERY);
+
+    function syncParlayLayout(event: MediaQueryListEvent) {
+      setIsParlayCollapsed(event.matches);
+    }
+
+    floatingParlayQuery.addEventListener("change", syncParlayLayout);
+    return () => floatingParlayQuery.removeEventListener("change", syncParlayLayout);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -513,7 +602,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   useEffect(() => {
     const controller = new AbortController();
 
-    async function loadGames() {
+    async function loadGames(options: { silent?: boolean } = {}) {
       try {
         const response = await fetch(
           `/api/games?date=${encodeURIComponent(selectedDate)}`,
@@ -528,6 +617,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
         }
 
         setGames(data.games);
+        setScheduleUpdatedAt(new Date().toISOString());
         setSelectedGamePk((current) => {
           const currentStillExists = data.games.some((game) => game.gamePk === current);
           if (currentStillExists) {
@@ -549,7 +639,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           return null;
         });
       } catch (loadError) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !options.silent) {
           setError(
             loadError instanceof Error ? loadError.message : "Unable to load games.",
           );
@@ -558,15 +648,29 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     }
 
     void loadGames();
-    return () => controller.abort();
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") {
+        void loadGames({ silent: true });
+      }
+    }, SCHEDULE_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(refreshTimer);
+      controller.abort();
+    };
   }, [selectedDate, selectedPlayer]);
 
   useEffect(() => {
-    if (isAnalyzing || isComparingLineup) {
+    if (isAnalyzing || isComparingLineup || pendingDetailScrollId) {
       return;
     }
 
     if (!hasResults) {
+      return;
+    }
+
+    if (skipNextResultsScrollRef.current) {
+      skipNextResultsScrollRef.current = false;
       return;
     }
 
@@ -578,7 +682,59 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     }, 140);
 
     return () => window.clearTimeout(scrollTimer);
-  }, [analysisId, hasResults, isAnalyzing, isComparingLineup, lineupComparisonId]);
+  }, [
+    analysisId,
+    hasResults,
+    isAnalyzing,
+    isComparingLineup,
+    lineupComparisonId,
+    pendingDetailScrollId,
+  ]);
+
+  useEffect(() => {
+    if (!showScheduleOverlay && !lineupDetailAnalysis) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [lineupDetailAnalysis, showScheduleOverlay]);
+
+  useEffect(() => {
+    if (
+      !pendingDetailScrollId ||
+      analysisId !== pendingDetailScrollId ||
+      detailLoadingPlayerId !== null
+    ) {
+      return;
+    }
+
+    const scrollTimer = window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        const detailSection = analysisDetailRef.current;
+
+        if (detailSection) {
+          const topOffset = 18;
+          const targetTop =
+            detailSection.getBoundingClientRect().top + window.scrollY - topOffset;
+
+          window.scrollTo({
+            top: Math.max(0, targetTop),
+            behavior: "smooth",
+          });
+        }
+
+        skipNextResultsScrollRef.current = true;
+        setPendingDetailScrollId(null);
+      });
+    }, 120);
+
+    return () => window.clearTimeout(scrollTimer);
+  }, [analysisId, detailLoadingPlayerId, pendingDetailScrollId]);
 
   function selectPlayer(player: PlayerSearchResult) {
     setSelectedPlayer(player);
@@ -586,10 +742,12 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     setPlayers([]);
     setActivePlayerIndex(-1);
     setAnalysis(null);
+    setLineupDetailAnalysis(null);
     setLineupComparison(null);
+    setSelectedGameWinPrediction(null);
   }
 
-  function addPlayerToParlay(player: ParlayPlayer) {
+  function addLegToParlay(player: ParlayLeg) {
     setParlayPlayers((current) => {
       if (current.some((entry) => entry.id === player.id)) {
         return current;
@@ -599,107 +757,69 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     });
   }
 
-  function removePlayerFromParlay(playerId: number) {
+  function removePlayerFromParlay(playerId: string) {
     setParlayPlayers((current) => current.filter((player) => player.id !== playerId));
   }
 
   function addAnalysisToParlay(result: AnalysisResult) {
-    const manualDecimalOdds = americanOddsToDecimal(manualOdds[getManualOddsKey(result)]);
-
-    addPlayerToParlay({
-      id: result.hitter.player.id,
+    addLegToParlay({
+      id: `player:${result.hitter.player.id}:${result.game.gamePk}:${result.market}`,
       name: result.hitter.player.fullName,
       batSide: result.hitter.player.batSide,
       team: result.hitter.player.currentTeamAbbreviation,
-      market: result.market,
+      label: getMarketLabel(result.market),
       probability: result.probabilities.atLeastOne,
-      odds:
-        manualDecimalOdds
-          ? {
-              line: 0.5,
-              over: manualDecimalOdds,
-            }
-          : result.odds?.status === "available"
-          ? {
-              line: result.odds.line,
-              over: result.odds.over,
-            }
-        : null,
     });
   }
 
-  function showLineupPlayerDetails(result: AnalysisResult) {
-    setDetailLoadingPlayerId(result.hitter.player.id);
-    setFeedbackStatus(null);
+  function addGameWinnerToParlay(result: GameWinPredictionResult, side: "away" | "home") {
+    const team = side === "home" ? result.homeTeam.team : result.awayTeam.team;
+    const probability =
+      side === "home" ? result.homeWinProbability : result.awayWinProbability;
 
-    window.setTimeout(() => {
-      setAnalysis(result);
-
-      window.requestAnimationFrame(() => {
-        analysisDetailRef.current?.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
-
-        window.setTimeout(() => {
-          setDetailLoadingPlayerId(null);
-        }, 220);
-      });
-    }, 120);
+    addLegToParlay({
+      id: `team-win:${result.game.gamePk}:${side}`,
+      name: `${team.abbreviation} Win`,
+      batSide: null,
+      team: team.name,
+      label: "Win",
+      probability,
+    });
   }
 
-  async function askAnalysisChat() {
-    if (!analysis || !analysisChatInput.trim() || isAnalysisChatLoading) {
-      return;
-    }
-
-    const userMessage: AnalysisChatMessage = {
-      role: "user",
-      content: analysisChatInput.trim(),
-    };
-    const nextMessages = [...analysisChatMessages, userMessage];
-
-    setAnalysisChatMessages(nextMessages);
-    setAnalysisChatInput("");
-    setIsAnalysisChatLoading(true);
+  async function showLineupPlayerDetails(result: AnalysisResult) {
+    setDetailLoadingPlayerId(result.hitter.player.id);
+    setFeedbackStatus(null);
+    setError(null);
 
     try {
-      const response = await fetch("/api/analysis-chat", {
+      const response = await fetch("/api/analyze", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          analysis,
-          messages: nextMessages,
+          playerId: result.hitter.player.id,
+          gamePk: result.game.gamePk,
+          market: result.market,
         }),
       });
-      const data = (await response.json()) as { answer?: string; error?: string };
+
+      const data = (await response.json()) as AnalysisResult & { error?: string };
 
       if (!response.ok) {
-        throw new Error(data.error ?? "Unable to answer that question.");
+        throw new Error(data.error ?? "Unable to build player details.");
       }
 
-      setAnalysisChatMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: data.answer ?? "I could not answer that from the current analysis.",
-        },
-      ]);
-    } catch (chatError) {
-      setAnalysisChatMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content:
-            chatError instanceof Error
-              ? chatError.message
-              : "Unable to answer that question right now.",
-        },
-      ]);
+      setLineupDetailAnalysis(data);
+    } catch (detailError) {
+      setError(
+        detailError instanceof Error
+          ? detailError.message
+          : "Unable to build player details.",
+      );
     } finally {
-      setIsAnalysisChatLoading(false);
+      setDetailLoadingPlayerId(null);
     }
   }
 
@@ -829,6 +949,49 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     }
   }
 
+  async function analyzeGameWinner(gamePk = selectedGamePk) {
+    if (!gamePk) {
+      return;
+    }
+
+    setGameWinnerLoadingPk(gamePk);
+    setError(null);
+    setFeedbackStatus(null);
+
+    try {
+      const response = await fetch("/api/game-win-prediction", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          gamePk,
+        }),
+      });
+      const data = (await response.json()) as GameWinPredictionResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Unable to build winner prediction.");
+      }
+
+      setGameWinPredictions((current) => ({
+        ...current,
+        [gamePk]: data,
+      }));
+      setSelectedGameWinPrediction(data);
+      setSelectedGamePk(gamePk);
+      setShowScheduleMenu(false);
+    } catch (winnerError) {
+      setError(
+        winnerError instanceof Error
+          ? winnerError.message
+          : "Unable to build winner prediction.",
+      );
+    } finally {
+      setGameWinnerLoadingPk(null);
+    }
+  }
+
   async function saveFeedback(rating: FeedbackRating) {
     if (!analysis) {
       return;
@@ -926,21 +1089,24 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
   const selectedGame = games.find((game) => game.gamePk === selectedGamePk) ?? null;
   const selectedMarketLabel = getMarketLabel(selectedMarket);
-  const recommendationTone =
-    analysis?.recommendation === "good play"
-      ? "positive"
-      : analysis?.recommendation === "avoid"
-        ? "negative"
-        : "neutral";
+  const recommendationTone = analysis ? getAnalysisTone(analysis) : "neutral";
+  const lineupDetailTone = lineupDetailAnalysis
+    ? getAnalysisTone(lineupDetailAnalysis)
+    : "neutral";
   const isDetailLoading = detailLoadingPlayerId !== null;
-  const isModelLoading = isAnalyzing || isComparingLineup || isDetailLoading;
+  const isGameWinnerLoading = gameWinnerLoadingPk !== null;
+  const isModelLoading = isAnalyzing || isComparingLineup || isDetailLoading || isGameWinnerLoading;
   const loadingTitle = isDetailLoading
     ? "Loading Batter Details"
+    : isGameWinnerLoading
+      ? "Predicting Game Winner"
     : isComparingLineup
       ? "Comparing The Lineup"
       : "Running Matchup Model";
   const loadingMessage = isDetailLoading
     ? "Opening the full matchup view, recent form, and model factors for this player."
+    : isGameWinnerLoading
+      ? "Blending starters, bullpen freshness, lineups, recent team form, weather, and park context."
     : isComparingLineup
       ? "Ranking the published starters, matchup context, and weather signal."
       : "Checking hitter form, pitcher profile, weather, prior results, and matchup history.";
@@ -953,12 +1119,14 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     setSelectedGamePk(null);
     setExpandedLineupGamePk(null);
     setShowScheduleDateMenu(false);
+    setShowScheduleOverlay(false);
     setAnalysis(null);
+    setLineupDetailAnalysis(null);
     setLineupComparison(null);
     setError(null);
   }
 
-  function renderScheduleBoard() {
+  function renderScheduleBoard({ expanded = false }: { expanded?: boolean } = {}) {
     return (
       <>
         <div className="section-heading-row">
@@ -1002,19 +1170,47 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   </div>
                 ) : null}
               </div>
+              {!expanded ? (
+                <div className="schedule-board-actions">
+                  <button
+                    type="button"
+                    className="schedule-count"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setShowScheduleDateMenu(false);
+                      setShowScheduleOverlay(true);
+                    }}
+                    aria-label="Open full schedule board"
+                  >
+                    <span className="live-dot" aria-hidden="true" />
+                    {games.length === 1 ? "1 game" : `${games.length} games`} · live
+                    updates · {formatRefreshTime(scheduleUpdatedAt)}
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
-          <span className="schedule-count">
-            {games.length === 1 ? "1 game" : `${games.length} games`}
-          </span>
+          {expanded ? (
+            <div className="schedule-board-actions schedule-overlay-actions">
+              <button
+                type="button"
+                className="schedule-minimize-button"
+                onClick={() => setShowScheduleOverlay(false)}
+              >
+                Minimize
+              </button>
+            </div>
+          ) : null}
         </div>
 
         {games.length > 0 ? (
-          <div className="schedule-grid">
+          <div className={`schedule-grid${expanded ? " schedule-grid-expanded" : ""}`}>
             {games.map((game) => {
               const isSelected = selectedGamePk === game.gamePk;
               const isLineupExpanded = expandedLineupGamePk === game.gamePk;
               const hasLineup = canShowLineup(game);
+              const winPrediction = gameWinPredictions[game.gamePk];
+              const isWinPredictionLoading = gameWinnerLoadingPk === game.gamePk;
 
               return (
                 <div
@@ -1028,6 +1224,9 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     setLineupComparison(null);
                     setError(null);
                     setShowScheduleMenu(false);
+                    if (expanded) {
+                      setShowScheduleOverlay(false);
+                    }
                   }}
                   role="button"
                   tabIndex={0}
@@ -1039,6 +1238,9 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                       setLineupComparison(null);
                       setError(null);
                       setShowScheduleMenu(false);
+                      if (expanded) {
+                        setShowScheduleOverlay(false);
+                      }
                     }
                   }}
                   aria-pressed={isSelected}
@@ -1085,15 +1287,29 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <span>{formatGameType(game.dayNight)}</span>
                   </div>
 
-                  {isFinalGame(game) && getGameWinner(game) ? (
-                    <div className="final-score-strip">
-                      <span className={getGameWinner(game) === "away" ? "winner" : "loser"}>
-                        {game.awayTeam.abbreviation} {game.awayScore}{" "}
-                        {getGameWinner(game) === "away" ? "W" : "L"}
+                  {hasGameScore(game) && isInProgressGame(game) ? (
+                    <div className="final-score-strip live-score-strip">
+                      <span
+                        className={
+                          getGameWinner(game) === "away"
+                            ? "winner"
+                            : getGameWinner(game) === "home"
+                              ? "loser"
+                              : ""
+                        }
+                      >
+                        {game.awayTeam.abbreviation} {game.awayScore}
                       </span>
-                      <span className={getGameWinner(game) === "home" ? "winner" : "loser"}>
-                        {game.homeTeam.abbreviation} {game.homeScore}{" "}
-                        {getGameWinner(game) === "home" ? "W" : "L"}
+                      <span
+                        className={
+                          getGameWinner(game) === "home"
+                            ? "winner"
+                            : getGameWinner(game) === "away"
+                              ? "loser"
+                              : ""
+                        }
+                      >
+                        {game.homeTeam.abbreviation} {game.homeScore}
                       </span>
                     </div>
                   ) : null}
@@ -1117,6 +1333,47 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                       <strong>Home Starter</strong>
                       {formatPitcherDisplay(game.homeProbablePitcher)}
                     </span>
+                  </div>
+
+                  <div className="winner-prediction-strip">
+                    {winPrediction ? (
+                      <div>
+                        <span>
+                          {winPrediction.awayTeam.team.abbreviation}{" "}
+                          {formatPercent(winPrediction.awayWinProbability)}
+                        </span>
+                        <strong>
+                          {winPrediction.predictedWinner.abbreviation}{" "}
+                          {formatPercent(
+                            Math.max(
+                              winPrediction.homeWinProbability,
+                              winPrediction.awayWinProbability,
+                            ),
+                          )}
+                        </strong>
+                        <span>
+                          {winPrediction.homeTeam.team.abbreviation}{" "}
+                          {formatPercent(winPrediction.homeWinProbability)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="muted">Winner probability not loaded</span>
+                    )}
+                    <button
+                      type="button"
+                      className="lineup-strip winner-preview-button"
+                      disabled={isWinPredictionLoading}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void analyzeGameWinner(game.gamePk);
+                      }}
+                    >
+                      {isWinPredictionLoading
+                        ? "Loading Win %..."
+                        : winPrediction
+                          ? "Refresh Win %"
+                          : "Show Win %"}
+                    </button>
                   </div>
 
                   <button
@@ -1188,174 +1445,77 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   }
 
   return (
-    <main className="shell">
-      <aside className="parlay-builder" aria-label="Parlay builder">
+    <main className={`shell${isParlayCollapsed ? " parlay-collapsed" : ""}`}>
+      <aside
+        className={`parlay-builder${isParlayCollapsed ? " collapsed" : ""}`}
+        aria-label="Parlay builder"
+      >
         <div className="parlay-builder-header">
           <div>
             <span className="field-label">Parlay Builder</span>
-            <strong>{parlayPlayers.length} players</strong>
+            <strong>
+              {parlayPlayers.length} leg{parlayPlayers.length === 1 ? "" : "s"}
+            </strong>
           </div>
-          {parlayPlayers.length > 0 ? (
+          <div className="parlay-builder-actions">
             <button
               type="button"
-              className="parlay-clear-button"
-              onClick={() => setParlayPlayers([])}
+              className="parlay-toggle-button"
+              aria-label={isParlayCollapsed ? "Open parlay builder" : "Minimize parlay builder"}
+              aria-expanded={!isParlayCollapsed}
+              onClick={() => setIsParlayCollapsed((current) => !current)}
             >
-              Clear
+              {isParlayCollapsed ? parlayPlayers.length || "+" : "Minimize"}
             </button>
-          ) : null}
-        </div>
-
-        {parlayPlayers.length > 0 ? (
-          <>
-            <ul className="parlay-list">
-              {parlayPlayers.map((player) => (
-                <li key={player.id}>
-                  <div>
-                    <strong>
-                      {formatPlayerNameWithBatSide({
-                        fullName: player.name,
-                        batSide: player.batSide,
-                      })}
-                    </strong>
-                    <span>
-                      {player.team ?? "MLB"}
-                      {player.market
-                        ? ` · ${getMarketLabel(player.market)} ${
-                            player.probability !== null
-                              ? formatPercent(player.probability)
-                              : ""
-                          }`
-                        : ""}
-                    </span>
-                    <span>
-                      DraftKings:{" "}
-                      {player.odds?.over
-                        ? `${getOddsMarketText(player.market ?? "hit")} ${formatAmericanOdds(
-                            player.odds.over,
-                          )}`
-                        : "odds not posted"}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`Remove ${player.name} from parlay builder`}
-                    onClick={() => removePlayerFromParlay(player.id)}
-                  >
-                    x
-                  </button>
-                </li>
-              ))}
-            </ul>
-
-            <div className="parlay-payout-card">
-              <label htmlFor="parlay-stake">
-                <span className="field-label">Stake</span>
-                <input
-                  id="parlay-stake"
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={parlayStake}
-                  onChange={(event) => setParlayStake(event.target.value)}
-                />
-              </label>
-              <div className="parlay-payout-grid">
-                <span>
-                  <span className="field-label">Odds</span>
-                  <strong>
-                    {combinedParlayOdds !== null && missingParlayOdds === 0
-                      ? formatAmericanOdds(String(combinedParlayOdds))
-                      : "n/a"}
-                  </strong>
-                </span>
-                <span>
-                  <span className="field-label">Payout</span>
-                  <strong>
-                    {parlayPayout !== null ? formatCurrency(parlayPayout) : "n/a"}
-                  </strong>
-                </span>
-                <span>
-                  <span className="field-label">Profit</span>
-                  <strong>
-                    {parlayProfit !== null ? formatCurrency(parlayProfit) : "n/a"}
-                  </strong>
-                </span>
-              </div>
-              {missingParlayOdds > 0 ? (
-                <p>
-                  {missingParlayOdds} leg{missingParlayOdds === 1 ? "" : "s"} need
-                  posted DraftKings odds before payout can be calculated.
-                </p>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <p className="parlay-empty">Add players from the analysis card to build a shortlist.</p>
-        )}
-      </aside>
-
-      {analysis ? (
-        <aside className="analysis-chatbot" aria-label="Ask the model">
-          <div className="analysis-chatbot-header">
-            <div>
-              <span className="field-label">Ask The Model</span>
-              <strong>{formatPlayerNameWithBatSide(analysis.hitter.player)}</strong>
-            </div>
-            {analysisChatMessages.length > 0 ? (
+            {parlayPlayers.length > 0 ? (
               <button
                 type="button"
-                className="analysis-chat-clear"
-                onClick={() => setAnalysisChatMessages([])}
+                className="parlay-clear-button"
+                onClick={() => setParlayPlayers([])}
               >
                 Clear
               </button>
             ) : null}
           </div>
+        </div>
 
-          <div className="analysis-chat-messages" aria-live="polite">
-            {analysisChatMessages.length === 0 ? (
-              <div className="analysis-chat-empty">
-                <strong>Ask why the number moved.</strong>
-                <span>Try: “Why is the hit chance this high?” or “What lowered it?”</span>
-              </div>
-            ) : (
-              analysisChatMessages.map((message, index) => (
-                <div
-                  key={`${message.role}-${index}`}
-                  className={`analysis-chat-message ${message.role}`}
-                >
-                  {message.content}
-                </div>
-              ))
-            )}
-            {isAnalysisChatLoading ? (
-              <div className="analysis-chat-message assistant">Thinking through the model...</div>
-            ) : null}
-          </div>
+        <div className="parlay-builder-body">
+          {parlayPlayers.length > 0 ? (
+            <>
+              <ul className="parlay-list">
+                {parlayPlayers.map((player) => (
+                  <li key={player.id}>
+                    <div>
+                      <strong>
+                        {formatPlayerNameWithBatSide({
+                          fullName: player.name,
+                          batSide: player.batSide,
+                        })}
+                      </strong>
+                      <span>
+                        {player.team ?? "MLB"}
+                        {` · ${player.label} ${
+                          player.probability !== null ? formatPercent(player.probability) : ""
+                        }`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${player.name} from parlay builder`}
+                      onClick={() => removePlayerFromParlay(player.id)}
+                    >
+                      x
+                    </button>
+                  </li>
+                ))}
+              </ul>
 
-          <form
-            className="analysis-chat-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void askAnalysisChat();
-            }}
-          >
-            <textarea
-              value={analysisChatInput}
-              onChange={(event) => setAnalysisChatInput(event.target.value)}
-              placeholder="Ask about the percentage..."
-              rows={3}
-            />
-            <button
-              type="submit"
-              disabled={!analysisChatInput.trim() || isAnalysisChatLoading}
-            >
-              Ask
-            </button>
-          </form>
-        </aside>
-      ) : null}
+            </>
+          ) : (
+          <p className="parlay-empty">Add players or team winners to build a shortlist.</p>
+          )}
+        </div>
+      </aside>
 
       {isModelLoading ? (
         <div className="loading-overlay" role="status" aria-live="polite">
@@ -1367,6 +1527,306 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
               <p className="eyebrow">{loadingTitle}</p>
               <h2>Building the call</h2>
               <p>{loadingMessage}</p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showScheduleOverlay ? (
+        <div
+          className="schedule-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Full schedule board"
+        >
+          <div className="schedule-overlay-panel">
+            {renderScheduleBoard({ expanded: true })}
+          </div>
+        </div>
+      ) : null}
+
+      {lineupDetailAnalysis ? (
+        <div
+          className="player-detail-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${lineupDetailAnalysis.hitter.player.fullName} player details`}
+        >
+          <div className="player-detail-modal">
+            <div className="player-detail-modal-header">
+              <div>
+                <p className="eyebrow">Player Detail</p>
+                <h2>{formatPlayerNameWithBatSide(lineupDetailAnalysis.hitter.player)}</h2>
+                <span>
+                  {lineupDetailAnalysis.marketLabel} ·{" "}
+                  {formatPercent(lineupDetailAnalysis.probabilities.atLeastOne)}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="player-detail-close"
+                aria-label="Close player details"
+                onClick={() => setLineupDetailAnalysis(null)}
+              >
+                X
+              </button>
+            </div>
+
+            <div className="player-detail-modal-body">
+              <div className="grid secondary-grid">
+                <div className={`panel summary-card summary-lead ${lineupDetailTone}`}>
+                  <div className="player-media-stack">
+                    <Image
+                      src={buildPlayerHeadshotUrl(lineupDetailAnalysis.hitter.player.id)}
+                      alt={`${lineupDetailAnalysis.hitter.player.fullName} headshot`}
+                      width={132}
+                      height={132}
+                      className="player-headshot"
+                    />
+                    <button
+                      type="button"
+                      className="parlay-add-button"
+                      onClick={() => addAnalysisToParlay(lineupDetailAnalysis)}
+                      disabled={parlayPlayers.some(
+                        (player) =>
+                          player.id ===
+                          `player:${lineupDetailAnalysis.hitter.player.id}:${lineupDetailAnalysis.game.gamePk}:${lineupDetailAnalysis.market}`,
+                      )}
+                    >
+                      {parlayPlayers.some(
+                        (player) =>
+                          player.id ===
+                          `player:${lineupDetailAnalysis.hitter.player.id}:${lineupDetailAnalysis.game.gamePk}:${lineupDetailAnalysis.market}`,
+                      )
+                        ? "Added"
+                        : "Add To Parlay"}
+                    </button>
+                  </div>
+                  <p className="eyebrow">{lineupDetailAnalysis.recommendation}</p>
+                  <div className="player-result-heading">
+                    <div>
+                      <h2>
+                        {formatPlayerNameWithBatSide(lineupDetailAnalysis.hitter.player)}
+                      </h2>
+                      <span>
+                        {lineupDetailAnalysis.hitter.player.currentTeamName ?? "MLB"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="probability">
+                    {formatPercent(lineupDetailAnalysis.probabilities.atLeastOne)}
+                  </div>
+                  <p className="muted">{buildPlayerCardReason(lineupDetailAnalysis)}</p>
+                </div>
+
+                <div className="panel summary-card summary-notes">
+                  <h2>Previous Model Result</h2>
+                  <div className="previous-result-box">
+                    {lineupDetailAnalysis.previousModelResult ? (
+                      <>
+                        <strong>
+                          {lineupDetailAnalysis.previousModelResult.date}:{" "}
+                          {lineupDetailAnalysis.previousModelResult.probability !== null
+                            ? `${lineupDetailAnalysis.previousModelResult.marketLabel} ${formatPercent(
+                                lineupDetailAnalysis.previousModelResult.probability,
+                              )}`
+                            : lineupDetailAnalysis.previousModelResult.marketLabel}
+                        </strong>
+                        <span>
+                          {getPreviousResultLabel(
+                            lineupDetailAnalysis.previousModelResult.rating,
+                          )}
+                          {lineupDetailAnalysis.previousModelResult.actualHits !== null
+                            ? ` - ${lineupDetailAnalysis.previousModelResult.actualHits} H, ${lineupDetailAnalysis.previousModelResult.actualHomeRuns} HR, ${lineupDetailAnalysis.previousModelResult.actualAtBats} AB`
+                            : ""}
+                        </span>
+                        <span>
+                          {lineupDetailAnalysis.previousModelResult.game
+                            ? `${lineupDetailAnalysis.previousModelResult.game.awayTeam.abbreviation} @ ${lineupDetailAnalysis.previousModelResult.game.homeTeam.abbreviation}`
+                            : lineupDetailAnalysis.previousModelResult.message}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <strong>Previous-day result unavailable.</strong>
+                        <span>The model kept previous outcome context neutral.</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="panel summary-card matchup-history-card top-matchup-history">
+                  <h2>Batter Vs Pitcher</h2>
+                  <p className="muted">
+                    {lineupDetailAnalysis.batterVsPitcher?.summary ??
+                      `${lineupDetailAnalysis.hitter.player.fullName} has not previously faced ${
+                        lineupDetailAnalysis.pitcher.player?.fullName ??
+                        "the probable pitcher"
+                      } in the Statcast sample.`}
+                  </p>
+                  <ul className="matchup-history-list">
+                    <li>
+                      <span>Matchup</span>
+                      <strong>
+                        {lineupDetailAnalysis.hitter.player.fullName} vs{" "}
+                        {lineupDetailAnalysis.batterVsPitcher?.pitcherName ??
+                          lineupDetailAnalysis.pitcher.player?.fullName ??
+                          "TBD"}
+                      </strong>
+                    </li>
+                    <li>
+                      <span>Line</span>
+                      <strong>
+                        {lineupDetailAnalysis.batterVsPitcher
+                          ? `${lineupDetailAnalysis.batterVsPitcher.hits} H / ${lineupDetailAnalysis.batterVsPitcher.atBats} AB`
+                          : "0 H / 0 AB"}
+                      </strong>
+                    </li>
+                    <li>
+                      <span>AVG</span>
+                      <strong>
+                        {formatOptionalNumber(
+                          lineupDetailAnalysis.batterVsPitcher?.battingAverage,
+                          3,
+                        )}
+                      </strong>
+                    </li>
+                    <li>
+                      <span>HR</span>
+                      <strong>{lineupDetailAnalysis.batterVsPitcher?.homeRuns ?? 0}</strong>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="panel summary-card recent-form-card">
+                  <h2>Last 5 Games</h2>
+                  {lineupDetailAnalysis.hitter.recentGames.length > 0 ? (
+                    <div className="recent-game-table">
+                      <div className="recent-game-row recent-game-header">
+                        <span>Date</span>
+                        <span>Opp</span>
+                        <span>AB</span>
+                        <span>H</span>
+                        <span>R</span>
+                        <span>RBI</span>
+                        <span>HR</span>
+                      </div>
+                      {lineupDetailAnalysis.hitter.recentGames.map((game) => (
+                        <div
+                          key={`${game.gamePk ?? game.date}-${game.opponent ?? "opp"}`}
+                          className="recent-game-row"
+                        >
+                          <span>{formatShortDate(game.date)}</span>
+                          <span>{game.opponent ?? "MLB"}</span>
+                          <strong>{game.atBats}</strong>
+                          <strong>{game.hits}</strong>
+                          <strong>{game.runs}</strong>
+                          <strong>{game.rbi}</strong>
+                          <strong>{game.homeRuns}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="recent-game-empty">
+                      <strong>No recent game log available.</strong>
+                      <span>The model kept the last-5 game adjustment neutral.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="factor-grid">
+                {lineupDetailAnalysis.factors.map((factor) => (
+                  <div
+                    key={factor.label}
+                    className={`panel factor-card factor-impact-${factor.impact}`}
+                  >
+                    <h3>{factor.label}</h3>
+                    <div className="factor-value">
+                      {factor.impact === "positive"
+                        ? "Helps"
+                        : factor.impact === "negative"
+                          ? "Hurts"
+                          : "Neutral"}
+                    </div>
+                    <p className="factor-detail">{getPlainFactorDetail(factor)}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="snapshot-grid">
+                <div className="panel snapshot-card">
+                  <h3>Hitter Snapshot</h3>
+                  <ul className="snapshot-list">
+                    <li>
+                      2026 AVG: {formatOptionalNumber(lineupDetailAnalysis.hitter.season?.avg, 3)}
+                    </li>
+                    <li>
+                      2026 OPS: {formatOptionalNumber(lineupDetailAnalysis.hitter.season?.ops, 3)}
+                    </li>
+                    <li>2026 HR: {lineupDetailAnalysis.hitter.season?.homeRuns ?? "n/a"}</li>
+                    <li>
+                      Lineup slot: {lineupDetailAnalysis.hitter.lineupSlot ?? "not posted"}
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="panel snapshot-card">
+                  <h3>Pitcher Snapshot</h3>
+                  <ul className="snapshot-list">
+                    <li>
+                      Pitcher: {lineupDetailAnalysis.pitcher.player?.fullName ?? "TBD"}
+                    </li>
+                    <li>
+                      Throws: {getPitchHandLabel(lineupDetailAnalysis.pitcher.player?.pitchHand)}
+                    </li>
+                    <li>
+                      2026 ERA: {formatOptionalNumber(lineupDetailAnalysis.pitcher.season?.era, 2)}
+                    </li>
+                    <li>
+                      Pitch mix:{" "}
+                      {lineupDetailAnalysis.pitcher.pitchMix.length > 0
+                        ? lineupDetailAnalysis.pitcher.pitchMix
+                            .slice(0, 3)
+                            .map((pitch) => `${pitch.label} ${pitch.usage.toFixed(1)}%`)
+                            .join(", ")
+                        : "not available"}
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="panel snapshot-card">
+                  <h3>Venue And Weather</h3>
+                  <ul className="snapshot-list">
+                    <li>
+                      Venue: {lineupDetailAnalysis.venue?.name ?? lineupDetailAnalysis.game.venue.name}
+                    </li>
+                    <li>
+                      Weather: {formatOptionalNumber(lineupDetailAnalysis.weather?.temperatureF, 0)}F
+                    </li>
+                    <li>
+                      Wind: {formatOptionalNumber(lineupDetailAnalysis.weather?.windSpeedMph, 0)} mph
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="panel snapshot-card">
+                  <h3>Diagnostics</h3>
+                  <ul className="snapshot-list">
+                    <li>
+                      Hitter sample: {lineupDetailAnalysis.diagnostics.hitterSampleSize} ABs
+                    </li>
+                    <li>
+                      Pitch-mix coverage:{" "}
+                      {formatPercent(lineupDetailAnalysis.diagnostics.pitchMixCoverage)}
+                    </li>
+                    <li>
+                      Confidence:{" "}
+                      <ConfidenceLabel confidence={lineupDetailAnalysis.confidence} />
+                    </li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1549,12 +2009,19 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   onTouchStart={() => selectPlayer(player)}
                   onClick={() => selectPlayer(player)}
                 >
+                  <Image
+                    src={buildPlayerHeadshotUrl(player.id)}
+                    alt={`${player.fullName} headshot`}
+                    width={44}
+                    height={44}
+                    className="suggestion-headshot"
+                  />
                   <span>
                     <strong>{formatPlayerNameWithBatSide(player)}</strong>
-                  </span>
-                  <span className="muted">
-                    {player.currentTeamAbbreviation ?? "FA"} • {player.primaryPosition ?? "BAT"} •{" "}
-                    {player.batSide ?? "?"} hitter
+                    <span className="muted">
+                      {player.currentTeamAbbreviation ?? "FA"} • {player.primaryPosition ?? "BAT"} •{" "}
+                      {player.batSide ?? "?"} hitter
+                    </span>
                   </span>
                 </button>
               ))}
@@ -1659,9 +2126,17 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 ? "Comparing HR picks..."
                 : "Find Best Home Run Pick"}
             </button>
+            <button
+              type="button"
+              className="secondary-button pick-button"
+              onClick={() => void analyzeGameWinner()}
+              disabled={!selectedGamePk || isGameWinnerLoading}
+            >
+              {isGameWinnerLoading ? "Predicting winner..." : "Analyze Game Winner"}
+            </button>
             <span className="help-text">
               {selectedGame
-                ? `${selectedGame.awayTeam.abbreviation} at ${selectedGame.homeTeam.abbreviation} selected. Use the dropdown for single-player analysis, or the dedicated lineup buttons for best hit and best home-run picks.`
+                ? `${selectedGame.awayTeam.abbreviation} at ${selectedGame.homeTeam.abbreviation} selected. Use hitter tools, lineup buttons, or the game winner analyzer.`
                 : "Pick a hitter, market, and game to run the model."}
             </span>
           </div>
@@ -1672,7 +2147,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
               <p>
                 The model number is an estimated chance for the selected outcome in this
                 matchup, not a guarantee. Use it as a confidence signal, then compare it
-                against risk, odds, lineup spot, and the previous model result.
+                against risk, lineup spot, and the previous model result.
               </p>
             </div>
 
@@ -1706,72 +2181,317 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
             ref={resultsRef}
             className={`results${hasResults ? " results-ready" : ""}`}
           >
-            {lineupComparison?.topPick ? (
-              <div className="panel" style={{ marginBottom: "1rem" }}>
-            <p className="eyebrow">Starting Lineup Comparison</p>
-            <h2>
-              Best {lineupComparison.marketLabel.toLowerCase()} target:{" "}
-              {formatPlayerNameWithBatSide(lineupComparison.topPick.hitter.player)}
-            </h2>
-            <p className="muted">
-              {formatPercent(lineupComparison.topPick.probabilities.atLeastOne)} chance in{" "}
-              {lineupComparison.game.awayTeam.abbreviation} at{" "}
-              {lineupComparison.game.homeTeam.abbreviation}. The table below ranks every
-              published starter in the game.
-            </p>
+            {selectedGameWinPrediction ? (
+              <div className="panel game-winner-card">
+                <div className="panel-heading-row">
+                  <div>
+                    <p className="eyebrow">Game Winner Prediction</p>
+                    <h2>
+                      {selectedGameWinPrediction.awayTeam.team.abbreviation} at{" "}
+                      {selectedGameWinPrediction.homeTeam.team.abbreviation}
+                    </h2>
+                    <p className="muted">
+                      Predicted winner:{" "}
+                      <strong>{selectedGameWinPrediction.predictedWinner.abbreviation}</strong>{" "}
+                      with <ConfidenceLabel confidence={selectedGameWinPrediction.confidence} />.
+                      This is an independent baseball projection built from matchup data.
+                    </p>
+                  </div>
+                  <span className="winner-badge">
+                    {selectedGameWinPrediction.predictedWinner.abbreviation}{" "}
+                    {formatPercent(
+                      Math.max(
+                        selectedGameWinPrediction.homeWinProbability,
+                        selectedGameWinPrediction.awayWinProbability,
+                      ),
+                    )}
+                  </span>
+                </div>
 
-            <div className="snapshot-grid" style={{ marginTop: "1rem" }}>
-              {lineupComparison.players.slice(0, 6).map((entry, index) => (
-                <div key={entry.analysisId} className="panel snapshot-card">
-                  <h3>
-                    #{index + 1} {formatPlayerNameWithBatSide(entry.hitter.player)}
-                  </h3>
-                  <div className="comparison-card-actions">
+                <div className="winner-probability-grid">
+                  <div>
+                    <span className="field-label">Away Win</span>
+                    <strong>{formatPercent(selectedGameWinPrediction.awayWinProbability)}</strong>
+                    <span>{selectedGameWinPrediction.awayTeam.team.name}</span>
                     <button
                       type="button"
                       className="compact-add-button"
-                      onClick={() => showLineupPlayerDetails(entry)}
-                      disabled={isDetailLoading}
-                    >
-                      {detailLoadingPlayerId === entry.hitter.player.id
-                        ? "Loading..."
-                        : "Show More"}
-                    </button>
-                    <button
-                      type="button"
-                      className="compact-add-button"
-                      onClick={() => addAnalysisToParlay(entry)}
+                      onClick={() => addGameWinnerToParlay(selectedGameWinPrediction, "away")}
                       disabled={parlayPlayers.some(
-                        (player) => player.id === entry.hitter.player.id,
+                        (player) =>
+                          player.id ===
+                          `team-win:${selectedGameWinPrediction.game.gamePk}:away`,
                       )}
                     >
-                      {parlayPlayers.some((player) => player.id === entry.hitter.player.id)
+                      {parlayPlayers.some(
+                        (player) =>
+                          player.id ===
+                          `team-win:${selectedGameWinPrediction.game.gamePk}:away`,
+                      )
                         ? "Added"
-                        : "Add To Parlay"}
+                        : "Add Win To Parlay"}
                     </button>
                   </div>
-                  <ul className="snapshot-list">
-                    <li>Team: {entry.hitter.player.currentTeamAbbreviation ?? "n/a"}</li>
-                    <li>Lineup slot: {entry.hitter.lineupSlot ?? "n/a"}</li>
-                    <li>
-                      {lineupComparison.marketLabel}:{" "}
-                      {formatPercent(entry.probabilities.atLeastOne)}
-                    </li>
-                    <li>Confidence: {entry.confidence}</li>
-                    <li>Call: {entry.recommendation}</li>
-                    <li>Pitcher: {entry.pitcher.player?.fullName ?? "TBD"}</li>
-                    <li>Pitcher hand: {getPitchHandLabel(entry.pitcher.player?.pitchHand)}</li>
-                  </ul>
+                  <div>
+                    <span className="field-label">Home Win</span>
+                    <strong>{formatPercent(selectedGameWinPrediction.homeWinProbability)}</strong>
+                    <span>{selectedGameWinPrediction.homeTeam.team.name}</span>
+                    <button
+                      type="button"
+                      className="compact-add-button"
+                      onClick={() => addGameWinnerToParlay(selectedGameWinPrediction, "home")}
+                      disabled={parlayPlayers.some(
+                        (player) =>
+                          player.id ===
+                          `team-win:${selectedGameWinPrediction.game.gamePk}:home`,
+                      )}
+                    >
+                      {parlayPlayers.some(
+                        (player) =>
+                          player.id ===
+                          `team-win:${selectedGameWinPrediction.game.gamePk}:home`,
+                      )
+                        ? "Added"
+                        : "Add Win To Parlay"}
+                    </button>
+                  </div>
+                  <div>
+                    <span className="field-label">Model</span>
+                    <strong>{selectedGameWinPrediction.modelType}</strong>
+                    <span>{selectedGameWinPrediction.modelVersion}</span>
+                  </div>
                 </div>
-              ))}
-            </div>
 
-            {lineupComparison.skippedPlayers.length > 0 ? (
-              <p className="muted" style={{ marginTop: "1rem" }}>
-                Skipped: {lineupComparison.skippedPlayers.join(" | ")}
-              </p>
+                <div className="winner-methodology-box">
+                  <strong>Independent Number</strong>
+                  <p>
+                    This projection is built from baseball data only: starters, lineups,
+                    bullpen usage, team form, defense, park, and weather.
+                  </p>
+                  <span>
+                    Uses live baseball APIs for starters, lineups, bullpen usage, team form,
+                    defense, park, and weather before the model makes its own probability.
+                  </span>
+                  <span>
+                    Freshness: lineup {selectedGameWinPrediction.dataFreshness.lineupStatus},
+                    game status {selectedGameWinPrediction.dataFreshness.gameStatus}, generated{" "}
+                    {new Date(
+                      selectedGameWinPrediction.dataFreshness.generatedAt,
+                    ).toLocaleTimeString([], {
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                    .
+                  </span>
+                </div>
+
+                <div className="external-context-panel">
+                  <strong>External Context</strong>
+                  <div className="external-badge-row">
+                    {getExternalBadges(selectedGameWinPrediction.externalContext).map((badge) => (
+                      <span key={badge}>{badge}</span>
+                    ))}
+                  </div>
+                  {selectedGameWinPrediction.externalContext?.confidenceFlags.length ? (
+                    <p>
+                      Prediction confidence reduced because some enrichment sources were missing
+                      or incomplete.
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="winner-analysis-summary">
+                  <strong>Why The Model Leans This Way</strong>
+                  <p>{selectedGameWinPrediction.analysisSummary}</p>
+                </div>
+
+                <div className="winner-summary-sections">
+                  {selectedGameWinPrediction.summarySections.map((section) => (
+                    <div key={section.title} className="winner-summary-section">
+                      <div className="winner-summary-section-heading">
+                        <strong>{section.title}</strong>
+                        <span className={`factor-edge ${section.edge}`}>{section.edge}</span>
+                      </div>
+                      <div className="winner-stat-table">
+                        <div>
+                          <span />
+                          <span>{selectedGameWinPrediction.awayTeam.team.abbreviation}</span>
+                          <span>{selectedGameWinPrediction.homeTeam.team.abbreviation}</span>
+                        </div>
+                        {section.stats.map((stat) => (
+                          <div key={stat.label}>
+                            <span>{stat.label}</span>
+                            <strong>{stat.away}</strong>
+                            <strong>{stat.home}</strong>
+                          </div>
+                        ))}
+                      </div>
+                      <p>{section.note}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="winner-series-history">
+                  <div className="winner-summary-section-heading">
+                    <strong>Previous Games In This Series</strong>
+                    <span className="muted">
+                      {selectedGameWinPrediction.previousSeriesGames.length > 0
+                        ? `${selectedGameWinPrediction.previousSeriesGames.length} found`
+                        : "none yet"}
+                    </span>
+                  </div>
+                  {selectedGameWinPrediction.previousSeriesGames.length > 0 ? (
+                    <div className="series-game-list">
+                      {selectedGameWinPrediction.previousSeriesGames.map((seriesGame) => (
+                        <div key={seriesGame.gamePk} className="series-game-row">
+                          <span>{formatShortDate(seriesGame.officialDate)}</span>
+                          <strong
+                            className={seriesGame.winner === "away" ? "series-winner" : ""}
+                          >
+                            {seriesGame.awayTeam.abbreviation} {seriesGame.awayScore ?? "-"}
+                          </strong>
+                          <span>@</span>
+                          <strong
+                            className={seriesGame.winner === "home" ? "series-winner" : ""}
+                          >
+                            {seriesGame.homeTeam.abbreviation} {seriesGame.homeScore ?? "-"}
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">
+                      No completed head-to-head games were found in the last week, so series
+                      momentum is kept neutral.
+                    </p>
+                  )}
+                </div>
+
+                <div className="winner-factor-grid">
+                  {selectedGameWinPrediction.topFactors.slice(0, 4).map((factor) => (
+                    <div key={`${factor.factor}-${factor.detail}`}>
+                      <span className={`factor-edge ${factor.edge}`}>{factor.edge}</span>
+                      <strong>{factor.factor}</strong>
+                      <p>{factor.detail}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {selectedGameWinPrediction.warnings.length > 0 ? (
+                  <div className="winner-warning-list">
+                    {selectedGameWinPrediction.warnings.map((warning) => (
+                      <span key={warning}>{warning}</span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
-          </div>
+
+            {lineupComparison?.topPick ? (
+              <div className="panel lineup-comparison-panel">
+                <p className="eyebrow">Starting Lineup Comparison</p>
+                <h2>
+                  Best {lineupComparison.marketLabel.toLowerCase()} target:{" "}
+                  {formatPlayerNameWithBatSide(lineupComparison.topPick.hitter.player)}
+                </h2>
+                <p className="muted">
+                  The cards below rank the published starters by the model&apos;s projected
+                  {` ${lineupComparison.marketLabel.toLowerCase()} probability`} and explain the
+                  main reasons behind each number.
+                </p>
+
+                <div className="lineup-pick-grid">
+                  {lineupComparison.players.slice(0, 8).map((entry, index) => {
+                    const tone = getAnalysisTone(entry);
+
+                    return (
+                      <div key={entry.analysisId} className={`lineup-pick-card ${tone}`}>
+                        <div className="lineup-pick-rank">#{index + 1}</div>
+                        <div className="lineup-pick-matchup">
+                          <div className="lineup-pick-person">
+                            <Image
+                              src={buildPlayerHeadshotUrl(entry.hitter.player.id)}
+                              alt={`${entry.hitter.player.fullName} headshot`}
+                              width={88}
+                              height={88}
+                              className="lineup-pick-headshot"
+                            />
+                            <strong>{formatPlayerNameWithBatSide(entry.hitter.player)}</strong>
+                            <span>{entry.hitter.player.currentTeamAbbreviation ?? "MLB"}</span>
+                          </div>
+                          <span className="lineup-pick-vs">VS</span>
+                          <div className="lineup-pick-pitcher">
+                            {entry.pitcher.player ? (
+                              <Image
+                                src={buildPlayerHeadshotUrl(entry.pitcher.player.id)}
+                                alt={`${entry.pitcher.player.fullName} headshot`}
+                                width={88}
+                                height={88}
+                                className="lineup-pick-headshot"
+                              />
+                            ) : (
+                              <div className="lineup-pick-headshot placeholder">TBD</div>
+                            )}
+                            <strong>{entry.pitcher.player?.fullName ?? "TBD Pitcher"}</strong>
+                            <span>{getPitchHandLabel(entry.pitcher.player?.pitchHand)}</span>
+                          </div>
+                        </div>
+
+                        <div className="lineup-pick-main">
+                          <span className="field-label">{lineupComparison.marketLabel}</span>
+                          <strong>{formatPercent(entry.probabilities.atLeastOne)}</strong>
+                          <span className={`pick-call ${tone}`}>{entry.recommendation}</span>
+                        </div>
+
+                        <div className="lineup-pick-meta">
+                          <span>Slot {entry.hitter.lineupSlot ?? "n/a"}</span>
+                          <ConfidenceLabel confidence={entry.confidence} />
+                          <span>{entry.probabilities.expectedAtBats.toFixed(1)} exp AB</span>
+                        </div>
+
+                        <p className="lineup-pick-reason">{buildPlayerCardReason(entry)}</p>
+
+                        <div className="comparison-card-actions">
+                          <button
+                            type="button"
+                            className="compact-add-button"
+                            onClick={() => void showLineupPlayerDetails(entry)}
+                            disabled={isDetailLoading}
+                          >
+                            {detailLoadingPlayerId === entry.hitter.player.id
+                              ? "Loading..."
+                              : "Show More"}
+                          </button>
+                          <button
+                            type="button"
+                            className="compact-add-button"
+                            onClick={() => addAnalysisToParlay(entry)}
+                            disabled={parlayPlayers.some(
+                              (player) =>
+                                player.id ===
+                                `player:${entry.hitter.player.id}:${entry.game.gamePk}:${entry.market}`,
+                            )}
+                          >
+                            {parlayPlayers.some(
+                              (player) =>
+                                player.id ===
+                                `player:${entry.hitter.player.id}:${entry.game.gamePk}:${entry.market}`,
+                            )
+                              ? "Added"
+                              : "Add To Parlay"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {lineupComparison.skippedPlayers.length > 0 ? (
+                  <p className="muted" style={{ marginTop: "1rem" }}>
+                    Skipped: {lineupComparison.skippedPlayers.join(" | ")}
+                  </p>
+                ) : null}
+              </div>
         ) : null}
 
         {!analysis ? (
@@ -1801,10 +2521,16 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     className="parlay-add-button"
                     onClick={() => addAnalysisToParlay(analysis)}
                     disabled={parlayPlayers.some(
-                      (player) => player.id === analysis.hitter.player.id,
+                      (player) =>
+                        player.id ===
+                        `player:${analysis.hitter.player.id}:${analysis.game.gamePk}:${analysis.market}`,
                     )}
                   >
-                    {parlayPlayers.some((player) => player.id === analysis.hitter.player.id)
+                    {parlayPlayers.some(
+                      (player) =>
+                        player.id ===
+                        `player:${analysis.hitter.player.id}:${analysis.game.gamePk}:${analysis.market}`,
+                    )
                       ? "Added"
                       : "Add To Parlay"}
                   </button>
@@ -1819,7 +2545,12 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 <div className="probability">
                   {formatPercent(analysis.probabilities.atLeastOne)}
                 </div>
-                <p className="muted">{analysis.summary}</p>
+                <p className="muted">{buildPlayerCardReason(analysis)}</p>
+                <div className="external-badge-row compact">
+                  {getExternalBadges(analysis.externalContext ?? null).map((badge) => (
+                    <span key={badge}>{badge}</span>
+                  ))}
+                </div>
 
                 <div className="stat-strip">
                   <div className="stat-box">
@@ -1852,37 +2583,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                       </div>
                     </>
                   ) : null}
-                  <div className="stat-box odds-stat-box">
-                    <span className="field-label">DraftKings Odds</span>
-                    <strong>{formatDraftKingsOdds(analysis)}</strong>
-                  </div>
                 </div>
-
-                {analysis.odds?.status !== "available" ? (
-                  <div className="manual-odds-entry">
-                    <label className="field-label" htmlFor="manual-draftkings-odds">
-                      Manual DraftKings Odds
-                    </label>
-                    <div>
-                      <input
-                        id="manual-draftkings-odds"
-                        inputMode="numeric"
-                        placeholder="-150"
-                        value={manualOdds[getManualOddsKey(analysis)] ?? ""}
-                        onChange={(event) =>
-                          setManualOdds((current) => ({
-                            ...current,
-                            [getManualOddsKey(analysis)]: event.target.value,
-                          }))
-                        }
-                      />
-                      <span>
-                        Enter the {getOddsMarketText(analysis.market)} price from DraftKings if
-                        the API missed it.
-                      </span>
-                    </div>
-                  </div>
-                ) : null}
               </div>
 
               <div className="panel summary-card summary-notes">
@@ -2023,8 +2724,14 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   className={`panel factor-card factor-impact-${factor.impact}`}
                 >
                   <h3>{factor.label}</h3>
-                  <div className="factor-value">{factor.value}</div>
-                  <p className="factor-detail">{factor.detail}</p>
+                  <div className="factor-value">
+                    {factor.impact === "positive"
+                      ? "Helps"
+                      : factor.impact === "negative"
+                        ? "Hurts"
+                        : "Neutral"}
+                  </div>
+                  <p className="factor-detail">{getPlainFactorDetail(factor)}</p>
                 </div>
               ))}
             </div>
@@ -2110,7 +2817,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   <li>Arm strength: {formatOptionalNumber(analysis.defense?.armOverall, 1)}</li>
                   <li>Hitter sample: {analysis.diagnostics.hitterSampleSize} ABs</li>
                   <li>Pitch-mix coverage: {formatPercent(analysis.diagnostics.pitchMixCoverage)}</li>
-                  <li>Confidence: {analysis.confidence}</li>
+                  <li>Confidence: <ConfidenceLabel confidence={analysis.confidence} /></li>
                 </ul>
               </div>
             </div>

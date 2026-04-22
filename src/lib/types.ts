@@ -1,3 +1,5 @@
+import { type ExternalContext } from "@/lib/providers/provider-types";
+
 export type ImpactLabel = "positive" | "negative" | "neutral";
 export type ConfidenceLevel = "low" | "medium" | "high";
 export type Recommendation = "good play" | "neutral" | "avoid";
@@ -78,12 +80,15 @@ export interface LineupCardPlayer {
 export interface HittingStatLine {
   gamesPlayed: number | null;
   atBats: number | null;
+  runs?: number | null;
   hits: number | null;
   avg: number | null;
   obp: number | null;
   slg: number | null;
   ops: number | null;
   homeRuns: number | null;
+  doubles?: number | null;
+  triples?: number | null;
   plateAppearances: number | null;
   strikeOuts: number | null;
   baseOnBalls: number | null;
@@ -110,6 +115,9 @@ export interface PitchingStatLine {
   strikeOuts: number | null;
   baseOnBalls: number | null;
   hits: number | null;
+  homeRuns?: number | null;
+  runs?: number | null;
+  earnedRuns?: number | null;
   battersFaced: number | null;
 }
 
@@ -266,21 +274,8 @@ export interface AnalysisResult {
   summary: string;
   aiSummary: string | null;
   previousModelResult?: PreviousModelResult | null;
-  odds?: PlayerOddsSnapshot | null;
   batterVsPitcher: BatterVsPitcherSummary | null;
-}
-
-export interface PlayerOddsSnapshot {
-  status: "available" | "disabled" | "not_found" | "error";
-  bookmaker: "DraftKings";
-  market: AnalysisMarket;
-  marketName: string | null;
-  eventId: number | null;
-  line: number | null;
-  over: string | null;
-  under: string | null;
-  updatedAt: string | null;
-  message: string;
+  externalContext?: ExternalContext | null;
 }
 
 export interface BatterVsPitcherSummary {
@@ -355,4 +350,141 @@ export interface AnalysisModelInput {
   venue: VenueSnapshot | null;
   weather: WeatherSnapshot | null;
   defense: TeamDefenseSnapshot | null;
+  externalContext?: ExternalContext | null;
+  gameWinContext?: {
+    hitterTeamWinProbability: number;
+    opponentWinProbability: number;
+    predictedWinnerTeamId: number;
+    confidence: GameWinConfidence;
+    modelVersion: string;
+  } | null;
+}
+
+export type GameWinConfidence = "low" | "medium" | "high";
+export type GameWinFactorEdge = "home" | "away" | "neutral";
+
+export interface GameWinFactor {
+  factor: string;
+  edge: GameWinFactorEdge;
+  impact: number;
+  detail: string;
+}
+
+export interface GameWinFeatureVector {
+  home_starter_quality: number;
+  away_starter_quality: number;
+  starter_quality_diff: number;
+  starter_workload_diff: number;
+  home_starter_missing: number;
+  away_starter_missing: number;
+  offense_ops_diff: number;
+  offense_power_diff: number;
+  offense_plate_discipline_diff: number;
+  lineup_quality_diff: number;
+  lineup_confirmed: number;
+  bullpen_quality_diff: number;
+  bullpen_fatigue_diff: number;
+  defense_oaa_diff: number;
+  fielding_pct_diff: number;
+  recent_win_pct_diff: number;
+  recent_run_diff_per_game_diff: number;
+  season_win_pct_diff: number;
+  rest_days_diff: number;
+  home_field: number;
+  park_run_factor: number;
+  weather_run_environment: number;
+  is_day_game: number;
+  is_night_game: number;
+  is_twilight_start: number;
+  first_pitch_minutes_from_sunset: number;
+  day_length_minutes: number;
+  weather_severity_score: number;
+  weather_boost_for_hr: number;
+  weather_penalty_for_pitchers: number;
+  market_implied_home_win_prob: number;
+  market_implied_away_win_prob: number;
+  lineup_uncertainty_score: number;
+  injury_uncertainty_score: number;
+  external_data_completeness_score: number;
+  critical_missing_count: number;
+}
+
+export interface GameWinTeamSnapshot {
+  team: TeamGameInfo;
+  probablePitcher: GameSummary["homeProbablePitcher"];
+  starter: {
+    season: PitchingStatLine | null;
+    expected: ExpectedStatsLine | null;
+    priorSeason: PitchingStatLine | null;
+    priorExpected: ExpectedStatsLine | null;
+  };
+  offense: HittingStatLine | null;
+  pitching: PitchingStatLine | null;
+  fielding: FieldingStatLine | null;
+  defense: Pick<TeamDefenseSnapshot, "oaa" | "fieldingRunsPrevented" | "armOverall"> | null;
+  lineupStatus: LineupStatus;
+  lineupPlayers: LineupCardPlayer[];
+  recent: {
+    games: number;
+    wins: number;
+    losses: number;
+    winPct: number | null;
+    runDifferentialPerGame: number | null;
+    restDays: number | null;
+  };
+  bullpen: {
+    recentInnings: number | null;
+    backToBackRelievers: number | null;
+    fatigueScore: number | null;
+  };
+}
+
+export interface PreviousSeriesGame {
+  gamePk: number;
+  officialDate: string;
+  status: string;
+  homeTeam: TeamGameInfo;
+  awayTeam: TeamGameInfo;
+  homeScore: number | null;
+  awayScore: number | null;
+  winner: "home" | "away" | null;
+}
+
+export interface GameWinPredictionResult {
+  predictionId: string;
+  generatedAt: string;
+  modelVersion: string;
+  modelType: "trained" | "fallback";
+  methodology: {
+    dataSources: string[];
+  };
+  dataFreshness: {
+    generatedAt: string;
+    gameStatus: string;
+    lineupStatus: LineupStatus;
+    weatherForecastTime: string | null;
+  };
+  game: GameSummary;
+  homeTeam: GameWinTeamSnapshot;
+  awayTeam: GameWinTeamSnapshot;
+  homeWinProbability: number;
+  awayWinProbability: number;
+  predictedWinner: TeamGameInfo;
+  confidence: GameWinConfidence;
+  analysisSummary: string;
+  summarySections: Array<{
+    title: string;
+    edge: GameWinFactorEdge;
+    stats: Array<{
+      label: string;
+      away: string;
+      home: string;
+    }>;
+    note: string;
+  }>;
+  topFactors: GameWinFactor[];
+  warnings: string[];
+  features: GameWinFeatureVector;
+  previousSeriesGames: PreviousSeriesGame[];
+  externalContext: ExternalContext | null;
 }

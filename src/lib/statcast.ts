@@ -1,6 +1,6 @@
 import Papa from "papaparse";
 
-import { remember } from "@/lib/cache";
+import { fetchWithRetry, remember } from "@/lib/cache";
 import {
   type ExpectedStatsLine,
   type PitchMixEntry,
@@ -64,11 +64,14 @@ type CsvRow = Record<string, string>;
 
 async function fetchCsvRows(url: string): Promise<CsvRow[]> {
   return remember(url, SAVANT_CACHE_MS, async () => {
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       headers: {
         Accept: "text/csv",
       },
       cache: "no-store",
+    }, {
+      retries: 2,
+      timeoutMs: 12000,
     });
 
     if (!response.ok) {

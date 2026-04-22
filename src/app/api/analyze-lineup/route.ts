@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import { buildLineupComparison } from "@/lib/analyzer";
 import { appendPredictions } from "@/lib/feedback";
-import { getDraftKingsPlayerOdds } from "@/lib/odds";
 import { runDailyOutcomeAuditIfDue } from "@/lib/outcome-audit";
 
 export const runtime = "nodejs";
@@ -18,30 +17,9 @@ export async function POST(request: Request) {
     const body = requestSchema.parse(await request.json());
     await runDailyOutcomeAuditIfDue();
     const comparison = await buildLineupComparison(body.gamePk, body.market);
-    const topPickOdds = comparison.topPick
-      ? await getDraftKingsPlayerOdds(comparison.topPick)
-      : null;
-    const comparisonWithOdds =
-      comparison.topPick && topPickOdds
-        ? {
-            ...comparison,
-            topPick: {
-              ...comparison.topPick,
-              odds: topPickOdds,
-            },
-            players: comparison.players.map((player) =>
-              player.analysisId === comparison.topPick?.analysisId
-                ? {
-                    ...player,
-                    odds: topPickOdds,
-                  }
-                : player,
-            ),
-          }
-        : comparison;
-    await appendPredictions(comparisonWithOdds.players);
+    await appendPredictions(comparison.players);
 
-    return NextResponse.json(comparisonWithOdds);
+    return NextResponse.json(comparison);
   } catch (error) {
     const message =
       error instanceof z.ZodError

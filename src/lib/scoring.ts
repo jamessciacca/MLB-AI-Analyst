@@ -498,6 +498,72 @@ function estimateTeamObp(input: AnalysisModelInput) {
   );
 }
 
+function getGameWinEdge(input: AnalysisModelInput) {
+  return clamp((input.gameWinContext?.hitterTeamWinProbability ?? 0.5) - 0.5, -0.32, 0.32);
+}
+
+function getGameWinPerAtBatAdjustment(input: AnalysisModelInput, market: AnalysisMarket) {
+  const edge = getGameWinEdge(input);
+  const confidenceWeight =
+    input.gameWinContext?.confidence === "high"
+      ? 1
+      : input.gameWinContext?.confidence === "medium"
+        ? 0.75
+        : 0.5;
+
+  return clamp(edge * confidenceWeight * (market === "home_run" ? 0.035 : 0.055), -0.012, 0.014);
+}
+
+function getGameWinOpportunityAdjustment(input: AnalysisModelInput) {
+  const edge = getGameWinEdge(input);
+  const confidenceWeight =
+    input.gameWinContext?.confidence === "high"
+      ? 1
+      : input.gameWinContext?.confidence === "medium"
+        ? 0.75
+        : 0.5;
+
+  return clamp(edge * confidenceWeight * 0.32, -0.1, 0.12);
+}
+
+function adjustProbabilityForGameWin(
+  probability: number,
+  input: AnalysisModelInput,
+  market: AnalysisMarket,
+) {
+  if (!input.gameWinContext) {
+    return probability;
+  }
+
+  const edge = getGameWinEdge(input);
+  const confidenceWeight =
+    input.gameWinContext.confidence === "high"
+      ? 1
+      : input.gameWinContext.confidence === "medium"
+        ? 0.75
+        : 0.5;
+  const logit = Math.log(clamp(probability, 0.001, 0.999) / (1 - clamp(probability, 0.001, 0.999)));
+  const adjustment = edge * confidenceWeight * (market === "home_run" ? 0.22 : 0.32);
+
+  return clamp(1 / (1 + Math.exp(-(logit + adjustment))), 0.001, 0.999);
+}
+
+function gameWinExpectedHitsMultiplier(input: AnalysisModelInput) {
+  if (!input.gameWinContext) {
+    return 1;
+  }
+
+  const edge = getGameWinEdge(input);
+  const confidenceWeight =
+    input.gameWinContext.confidence === "high"
+      ? 1
+      : input.gameWinContext.confidence === "medium"
+        ? 0.75
+        : 0.5;
+
+  return clamp(1 + edge * confidenceWeight * 0.18, 0.94, 1.07);
+}
+
 export function estimateProjectedOpportunities(input: AnalysisModelInput) {
   const config = HIT_PROBABILITY_MODEL_CONFIG;
   const seasonAtBatsPerGame =
@@ -514,8 +580,12 @@ export function estimateProjectedOpportunities(input: AnalysisModelInput) {
   );
   const homeAdjustment =
     input.hitter.player.currentTeamId === input.game.homeTeam.id ? -0.06 : 0.04;
+  const gameWinOpportunityAdjustment = getGameWinOpportunityAdjustment(input);
   const projectedPlateAppearances = clamp(
-    (lineupPlateAppearances ?? seasonAtBatsPerGame + 0.55) + teamContextAdjustment + homeAdjustment,
+    (lineupPlateAppearances ?? seasonAtBatsPerGame + 0.55) +
+      teamContextAdjustment +
+      homeAdjustment +
+      gameWinOpportunityAdjustment,
     3.2,
     5.15,
   );
@@ -532,6 +602,7 @@ export function estimateProjectedOpportunities(input: AnalysisModelInput) {
     projectedAtBats: clamp(projectedPlateAppearances * atBatShare, 3.05, 5.05),
     teamContextAdjustment,
     homeAdjustment,
+    gameWinOpportunityAdjustment,
   };
 }
 
@@ -911,10 +982,15 @@ export function scoreOutcomeChance(
     input.venue?.roofType ?? null,
     market,
   );
+  const externalAdjustment =
+    market === "home_run"
+      ? input.externalContext?.features.weatherBoostForHR ?? 0
+      : -(input.externalContext?.features.weatherSeverityScore ?? 0) * 0.015;
+  const gameWinPerAtBatAdjustment = getGameWinPerAtBatAdjustment(input, market);
 
   const contextPerAtBat =
     market === "hit" && hitModel
-      ? hitModel.perOpportunity
+      ? clamp(hitModel.perOpportunity + externalAdjustment, 0.02, 0.72)
       : clamp(
           baseline +
             pitcherAdjustment +
@@ -923,6 +999,8 @@ export function scoreOutcomeChance(
             defenseAdjustment +
             parkAdjustment +
             weatherAdjustment +
+            externalAdjustment +
+            gameWinPerAtBatAdjustment +
             feedbackCalibration,
           0.005,
           0.2,
@@ -935,10 +1013,22 @@ export function scoreOutcomeChance(
       : opportunityProjection.projectedAtBats;
 
   const mlPrediction = market === "hit" ? predictHitWithMl(input) : null;
-  const perAtBat = mlPrediction?.inferredPerAtBat ?? contextPerAtBat;
+  const perAtBat = clamp(
+    (mlPrediction?.inferredPerAtBat ?? contextPerAtBat) + gameWinPerAtBatAdjustment,
+    market === "home_run" ? 0.005 : 0.02,
+    market === "home_run" ? 0.2 : 0.72,
+  );
   const atLeastOne = 1 - (1 - perAtBat) ** expectedAtBats;
-  const finalAtLeastOne = mlPrediction?.probability1PlusHit ?? atLeastOne;
-  const expectedHits = market === "hit" ? mlPrediction?.expectedHits ?? expectedAtBats * perAtBat : null;
+  const finalAtLeastOne = adjustProbabilityForGameWin(
+    mlPrediction?.probability1PlusHit ?? atLeastOne,
+    input,
+    market,
+  );
+  const expectedHits =
+    market === "hit"
+      ? (mlPrediction?.expectedHits ?? expectedAtBats * perAtBat) *
+        gameWinExpectedHitsMultiplier(input)
+      : null;
   const atLeastTwo =
     market === "hit"
       ? mlPrediction?.probability2PlusHits ?? poissonBinomialAtLeastTwo(perAtBat, expectedAtBats)
@@ -1068,8 +1158,8 @@ export function scoreOutcomeChance(
     },
     {
       label: "Weather",
-      value: `${weatherAdjustment >= 0 ? "+" : ""}${formatDecimal(weatherAdjustment)}`,
-      impact: impactLabel(weatherAdjustment),
+      value: `${weatherAdjustment + externalAdjustment >= 0 ? "+" : ""}${formatDecimal(weatherAdjustment + externalAdjustment)}`,
+      impact: impactLabel(weatherAdjustment + externalAdjustment),
       detail: input.weather
         ? `${Math.round(input.weather.temperatureF ?? 70)}F, ${
             input.weather.precipitationProbability ?? 0
@@ -1087,6 +1177,22 @@ export function scoreOutcomeChance(
       )} plate appearances and ${expectedAtBats.toFixed(1)} at-bats.`,
     },
   ];
+
+  if (input.gameWinContext) {
+    const edge = getGameWinEdge(input);
+
+    factors.push({
+      label: "Team win context",
+      value: `${formatPercent(input.gameWinContext.hitterTeamWinProbability)} win`,
+      impact: impactLabel(edge),
+      detail:
+        edge > 0
+          ? `The game winner model favors ${input.hitter.player.currentTeamAbbreviation ?? "this team"}, so the hitter gets a small boost for stronger projected offense and run environment.`
+          : edge < 0
+            ? `The game winner model leans toward the opponent, so the hitter gets a small drag for weaker projected team context.`
+            : "The game winner model sees this matchup as close, so team-win context stays neutral.",
+    });
+  }
 
   if (feedbackCalibration !== 0) {
     factors.push({
@@ -1148,6 +1254,11 @@ export function scoreOutcomeChance(
   }
   if (input.hitter.recentGames.length > 0) {
     notes.push("Last-5 game-log form was included as a short-term adjustment.");
+  }
+  if (input.gameWinContext) {
+    notes.push(
+      `The ${input.gameWinContext.modelVersion} game winner projection was used as a small team-context adjustment.`,
+    );
   }
   if (feedbackCalibration !== 0) {
     notes.push("Saved feedback has started calibrating this market.");

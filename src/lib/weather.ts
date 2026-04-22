@@ -1,4 +1,4 @@
-import { remember } from "@/lib/cache";
+import { fetchWithRetry, remember } from "@/lib/cache";
 import { type VenueSnapshot, type WeatherCondition, type WeatherSnapshot } from "@/lib/types";
 import { asNumber } from "@/lib/utils";
 
@@ -82,8 +82,11 @@ export async function getGameWeather(
   url.searchParams.set("timezone", "auto");
 
   const weather = await remember(url.toString(), WEATHER_TTL_MS, async () => {
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       cache: "no-store",
+    }, {
+      retries: 2,
+      timeoutMs: 7000,
     });
 
     if (!response.ok) {

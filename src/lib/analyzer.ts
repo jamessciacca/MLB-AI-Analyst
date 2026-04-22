@@ -12,6 +12,8 @@ import {
   getTeamFieldingStats,
   getVenueById,
 } from "@/lib/mlb";
+import { buildExternalContext } from "@/lib/enrichment/external-context";
+import { buildGameWinPrediction } from "@/lib/game-win-analyzer";
 import {
   getBatterExpectedStats,
   getBatterStatcastRows,
@@ -30,8 +32,10 @@ import {
   type LineupComparisonResult,
   type AnalysisResult,
   type BatterVsPitcherSummary,
+  type GameWinPredictionResult,
   type PreviousModelResult,
   type TeamDefenseSnapshot,
+  type WeatherSnapshot,
 } from "@/lib/types";
 import { scoreOutcomeChance } from "@/lib/scoring";
 import { minusDays } from "@/lib/utils";
@@ -45,6 +49,70 @@ const NON_AT_BAT_EVENTS = new Set([
   "sac_bunt",
   "catcher_interf",
 ]);
+
+const gameWinPredictionCache = new Map<number, Promise<GameWinPredictionResult>>();
+
+async function getCachedGameWinPrediction(gamePk: number) {
+  const cached = gameWinPredictionCache.get(gamePk);
+
+  if (cached) {
+    return cached;
+  }
+
+  const promise = buildGameWinPrediction(gamePk);
+  gameWinPredictionCache.set(gamePk, promise);
+
+  return promise;
+}
+
+function buildPlayerGameWinContext(
+  prediction: GameWinPredictionResult | null,
+  hitterTeamId: number | null | undefined,
+) {
+  if (!prediction || !hitterTeamId) {
+    return null;
+  }
+
+  const hitterIsHome = hitterTeamId === prediction.homeTeam.team.id;
+  const hitterIsAway = hitterTeamId === prediction.awayTeam.team.id;
+
+  if (!hitterIsHome && !hitterIsAway) {
+    return null;
+  }
+
+  const hitterTeamWinProbability = hitterIsHome
+    ? prediction.homeWinProbability
+    : prediction.awayWinProbability;
+
+  return {
+    hitterTeamWinProbability,
+    opponentWinProbability: 1 - hitterTeamWinProbability,
+    predictedWinnerTeamId: prediction.predictedWinner.id,
+    confidence: prediction.confidence,
+    modelVersion: prediction.modelVersion,
+  };
+}
+
+function weatherFromExternal(
+  external: Awaited<ReturnType<typeof buildExternalContext>>,
+): WeatherSnapshot | null {
+  const weather = external?.weather;
+
+  if (!weather) {
+    return null;
+  }
+
+  return {
+    forecastTime: weather.time ?? new Date().toISOString(),
+    condition: weather.condition,
+    cloudCover: null,
+    temperatureF: weather.temperatureF,
+    apparentTemperatureF: weather.temperatureF,
+    precipitationProbability: weather.precipitationProbability,
+    windSpeedMph: weather.windSpeedMph,
+    humidity: weather.humidity,
+  };
+}
 
 function isAtBatEvent(event: string | null) {
   return Boolean(event) && !NON_AT_BAT_EVENTS.has(event ?? "");
@@ -220,8 +288,14 @@ export async function buildAnalysis(
           await getTeamDefenseExtras(opponentTeam.name, currentSeason),
         ];
 
-  const weather = await getGameWeather(venue, game.gameDate);
+  const externalContext = await buildExternalContext({
+    game,
+    venue,
+    lineupStatus: lineupContext.lineupSlot ? "partial" : "pending",
+  });
+  const weather = (await getGameWeather(venue, game.gameDate)) ?? weatherFromExternal(externalContext);
   const feedbackCalibration = await getFeedbackCalibration(market);
+  const gameWinPrediction = await getCachedGameWinPrediction(gamePk).catch(() => null);
   const batterVsPitcherRows =
     pitcher && probablePitcherInfo
       ? await getBatterVsPitcherRows(
@@ -279,6 +353,8 @@ export async function buildAnalysis(
     venue,
     weather,
     defense,
+    externalContext,
+    gameWinContext: buildPlayerGameWinContext(gameWinPrediction, hitter.currentTeamId),
   };
 
   const scored = scoreOutcomeChance(modelInput, market, feedbackCalibration.adjustment);
@@ -289,6 +365,7 @@ export async function buildAnalysis(
     generatedAt: new Date().toISOString(),
     aiSummary: null,
     batterVsPitcher,
+    externalContext,
   };
 }
 
