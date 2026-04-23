@@ -1581,6 +1581,12 @@ a {
   background: var(--suggestion-hover);
 }
 
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+}
+
 .model-details-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

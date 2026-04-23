@@ -7,8 +7,10 @@
     "Analyst": "next dev",
     "build": "next build",
     "start": "next start",
+    "chat": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/agent/terminalRunner.ts",
+    "export:resolved": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/export_resolved_predictions.ts",
     "lint": "eslint .",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs"
   },
   "dependencies": {
     "next": "^16.2.4",
