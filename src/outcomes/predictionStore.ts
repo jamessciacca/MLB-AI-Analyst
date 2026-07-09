@@ -32,6 +32,10 @@ function marketLineFor(market: string) {
     return "over_0.5_hit";
   }
 
+  if (market === "hit_2_plus") {
+    return "over_1.5_hits";
+  }
+
   return null;
 }
 
@@ -54,7 +58,14 @@ function toOutcomePrediction(raw: RawPrediction): OutcomePredictionRecord | null
   const probability = raw.probability;
   const recommendation =
     typeof raw.recommendation === "string" ? raw.recommendation : "unknown";
-  const marketType = raw.market === "home_run" ? "home_run" : raw.market === "hit" ? "hit" : "unknown";
+  const marketType =
+    raw.market === "home_run"
+      ? "home_run"
+      : raw.market === "hit_2_plus"
+        ? "hit_2_plus"
+        : raw.market === "hit"
+          ? "hit"
+          : "unknown";
 
   return {
     predictionId: raw.analysisId,

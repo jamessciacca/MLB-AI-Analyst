@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { Viewport } from "next";
 
 import "@/app/globals.css";
 
@@ -6,6 +7,12 @@ export const metadata: Metadata = {
   title: "MLB Analyst AI",
   description:
     "Search current MLB hitters and estimate their chance to record a hit in a specific game.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({

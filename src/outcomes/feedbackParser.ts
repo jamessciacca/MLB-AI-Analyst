@@ -9,6 +9,7 @@ const MARKET_PATTERNS: Array<{
   patterns: RegExp[];
 }> = [
   { market: "home_run", patterns: [/\b(home run|homer|homered|hr)\b/i] },
+  { market: "hit_2_plus", patterns: [/\b(2\+ hits?|two or more hits?|over 1\.5 hits?)\b/i] },
   { market: "hit", patterns: [/\b(hit|hits|single|got there|over 0\.5 hits?)\b/i] },
   { market: "rbi", patterns: [/\b(rbi|run batted in)\b/i] },
   { market: "total_bases", patterns: [/\b(total bases|bases|tb|over 1\.5)\b/i] },
@@ -82,7 +83,7 @@ function getActualValue(message: string, market: ParsedOutcomeFeedback["marketTy
   }
 
   if (
-    market === "hit" &&
+    (market === "hit" || market === "hit_2_plus") &&
     !negatedOutcome &&
     /\b(got a hit|had a hit|recorded a hit|got there)\b/i.test(message)
   ) {
@@ -114,7 +115,7 @@ function getActualOutcome(
   }
 
   if (actualValue !== null) {
-    if (/\bover\s+1\.5\b/i.test(message)) {
+    if (market === "hit_2_plus" || /\bover\s+1\.5\b/i.test(message)) {
       return actualValue > 1.5;
     }
 

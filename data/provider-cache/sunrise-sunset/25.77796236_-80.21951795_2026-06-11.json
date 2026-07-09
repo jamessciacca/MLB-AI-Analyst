@@ -1,0 +1,14 @@
+{
+  "expiresAt": 1812730569268,
+  "value": {
+    "source": "sunrise-sunset",
+    "sunrise": "2026-06-11T10:27:35+00:00",
+    "sunset": "2026-06-12T00:13:37+00:00",
+    "solarNoon": "2026-06-11T17:20:36+00:00",
+    "dayLengthMinutes": 826,
+    "firstPitchMinutesFromSunset": -424,
+    "isDayGame": true,
+    "isNightGame": false,
+    "isTwilightStart": false
+  }
+}

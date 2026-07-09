@@ -1,9 +1,9 @@
-import { type ExternalContext } from "@/lib/providers/provider-types";
+import type { ExternalContext } from "./providers/provider-types.ts";
 
 export type ImpactLabel = "positive" | "negative" | "neutral";
 export type ConfidenceLevel = "low" | "medium" | "high";
 export type Recommendation = "good play" | "neutral" | "avoid";
-export type AnalysisMarket = "hit" | "home_run";
+export type AnalysisMarket = "hit" | "hit_2_plus" | "home_run";
 export type WeatherCondition = "sunny" | "cloudy" | "rainy" | "unknown";
 export type LineupStatus = "released" | "partial" | "pending";
 
@@ -276,6 +276,8 @@ export interface AnalysisResult {
   previousModelResult?: PreviousModelResult | null;
   batterVsPitcher: BatterVsPitcherSummary | null;
   externalContext?: ExternalContext | null;
+  hitGameContext?: HitGameContextFeatures | null;
+  debug?: AnalysisDebug | null;
 }
 
 export interface BatterVsPitcherSummary {
@@ -321,7 +323,58 @@ export interface LineupComparisonResult {
   game: GameSummary;
   topPick: AnalysisResult | null;
   players: AnalysisResult[];
+  selection: HitterSelectionResult | null;
   skippedPlayers: string[];
+}
+
+export interface HitterSelectionComparisonEntry {
+  playerId: number;
+  playerName: string;
+  teamAbbreviation: string | null;
+  teamName: string | null;
+  lineupSlot: number | null;
+  finalScore: number;
+  hitProbability: number;
+  confidence: ConfidenceLevel;
+  recommendation: Recommendation;
+  rawProbabilityScore: number;
+  matchupScore: number;
+  recentFormScore: number;
+  atBatQualityScore: number;
+  valueScore: number;
+  underTheRadarScore: number;
+  riskScore: number;
+  reason: string;
+}
+
+export interface AnalystNarrativeSummary {
+  quickSummary: string;
+  whyThisPlayer: string[];
+  whyNotOthers: string[];
+  keyStats: string[];
+  riskSummary: string;
+  confidenceExplanation: string;
+  analystParagraph: string;
+}
+
+export interface HitterSelectionResult {
+  selectedPlayerId: number;
+  selectedHitter: string;
+  team: string;
+  opponent: string;
+  finalScore: number;
+  hitProbability: number;
+  confidence: ConfidenceLevel;
+  recommendation: Recommendation;
+  obviousStarPlayer: string | null;
+  whyHeStandsOut: string[];
+  whyNotTheStarPlayer: string[];
+  risks: string[];
+  shortExplanation: string;
+  topAlternatives: HitterSelectionComparisonEntry[];
+  comparisonTable: HitterSelectionComparisonEntry[];
+  analystNarrative: AnalystNarrativeSummary;
+  dataWarnings: string[];
 }
 
 export interface AnalysisModelInput {
@@ -357,6 +410,55 @@ export interface AnalysisModelInput {
     predictedWinnerTeamId: number;
     confidence: GameWinConfidence;
     modelVersion: string;
+  } | null;
+  hitGameContext?: HitGameContextFeatures | null;
+}
+
+export interface HitGameContextFeatures {
+  enabled: boolean;
+  source: "internal" | "market" | "blended" | "fallback";
+  hitterTeamWinProbability: number;
+  opponentTeamWinProbability: number;
+  internalHitterTeamWinProbability: number | null;
+  marketHitterTeamWinProbability: number | null;
+  winProbabilityGap: number;
+  hitterTeamIsFavorite: number;
+  hitterTeamIsUnderdog: number;
+  hitterTeamImpliedRuns: number;
+  opponentTeamImpliedRuns: number;
+  gameTotalRuns: number;
+  runTotalGap: number;
+  hitterTeamShareOfTotalRuns: number;
+  gameCompetitivenessScore: number;
+  blowoutRiskScore: number;
+  offensiveSuppressionRisk: number;
+  offensiveSupportScore: number;
+  hitContextBoost: number;
+  hitContextPenalty: number;
+  expectedPlateAppearanceEnvironment: number;
+  hitterTeamRunSupportIndex: number;
+  contextAdjustmentDelta: number;
+}
+
+export interface AnalysisDebug {
+  hitGameContext?: {
+    hitterTeamWinProbability: number | null;
+    hitterTeamImpliedRuns: number | null;
+    opponentTeamImpliedRuns: number | null;
+    gameTotalRuns: number | null;
+    gameCompetitivenessScore: number | null;
+    blowoutRiskScore: number | null;
+    offensiveSupportScore: number | null;
+    offensiveSuppressionRisk: number | null;
+    expectedPlateAppearanceEnvironment: number | null;
+    hitterTeamRunSupportIndex: number | null;
+    hitContextBoost: number | null;
+    hitContextPenalty: number | null;
+    contextAdjustmentDelta: number | null;
+    preContextHitProbability: number | null;
+    finalHitProbability: number | null;
+    uncalibratedFinalHitProbability?: number | null;
+    mlArtifactUsedGameContextFeatures: boolean | null;
   } | null;
 }
 

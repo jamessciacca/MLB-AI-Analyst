@@ -1,7 +1,7 @@
-import modelConfig from "../../ml/model_config.json";
+import modelConfig from "../../ml/model_config.json" with { type: "json" };
 
-import { type AnalysisModelInput, type StatcastEventRow } from "@/lib/types";
-import { average, clamp } from "@/lib/utils";
+import { type AnalysisModelInput, type StatcastEventRow } from "./types.ts";
+import { average, clamp } from "./utils.ts";
 
 const HIT_EVENTS = new Set(["single", "double", "triple", "home_run"]);
 const NON_AT_BAT_EVENTS = new Set([
@@ -86,8 +86,18 @@ function estimateProjectedAbs(input: AnalysisModelInput) {
     rate(input.hitter.season?.atBats, input.hitter.season?.gamesPlayed) ??
     rate(input.hitter.priorSeason?.atBats, input.hitter.priorSeason?.gamesPlayed);
   const isHome = input.hitter.player.currentTeamId === input.game.homeTeam.id;
+  const contextMultiplier = clamp(
+    input.hitGameContext?.expectedPlateAppearanceEnvironment ?? 1,
+    0.92,
+    1.1,
+  );
 
-  return clamp((seasonAbs ?? lineupBase) * 0.35 + lineupBase * 0.65 + (isHome ? -0.04 : 0.04), 3.05, 5.05);
+  return clamp(
+    ((seasonAbs ?? lineupBase) * 0.35 + lineupBase * 0.65 + (isHome ? -0.04 : 0.04)) *
+      contextMultiplier,
+    3.05,
+    5.05,
+  );
 }
 
 function parkHitFactor(input: AnalysisModelInput) {
@@ -192,6 +202,72 @@ export function buildMlHitFeatureVector(input: AnalysisModelInput): MlHitFeature
       "contact_quality_matchup",
       (batterHardHit ?? modelConfig.defaults.batter_hard_hit_rate) -
         (pitcherHardHit ?? modelConfig.defaults.pitcher_hard_hit_allowed),
+    ),
+    hitter_team_win_probability: withDefault(
+      "hitter_team_win_probability",
+      input.hitGameContext?.hitterTeamWinProbability,
+    ),
+    opponent_team_win_probability: withDefault(
+      "opponent_team_win_probability",
+      input.hitGameContext?.opponentTeamWinProbability,
+    ),
+    win_probability_gap: withDefault(
+      "win_probability_gap",
+      input.hitGameContext?.winProbabilityGap,
+    ),
+    hitter_team_is_favorite: withDefault(
+      "hitter_team_is_favorite",
+      input.hitGameContext?.hitterTeamIsFavorite,
+    ),
+    hitter_team_is_underdog: withDefault(
+      "hitter_team_is_underdog",
+      input.hitGameContext?.hitterTeamIsUnderdog,
+    ),
+    hitter_team_implied_runs: withDefault(
+      "hitter_team_implied_runs",
+      input.hitGameContext?.hitterTeamImpliedRuns,
+    ),
+    opponent_team_implied_runs: withDefault(
+      "opponent_team_implied_runs",
+      input.hitGameContext?.opponentTeamImpliedRuns,
+    ),
+    game_total_runs: withDefault("game_total_runs", input.hitGameContext?.gameTotalRuns),
+    run_total_gap: withDefault("run_total_gap", input.hitGameContext?.runTotalGap),
+    hitter_team_share_of_total_runs: withDefault(
+      "hitter_team_share_of_total_runs",
+      input.hitGameContext?.hitterTeamShareOfTotalRuns,
+    ),
+    game_competitiveness_score: withDefault(
+      "game_competitiveness_score",
+      input.hitGameContext?.gameCompetitivenessScore,
+    ),
+    blowout_risk_score: withDefault(
+      "blowout_risk_score",
+      input.hitGameContext?.blowoutRiskScore,
+    ),
+    offensive_suppression_risk: withDefault(
+      "offensive_suppression_risk",
+      input.hitGameContext?.offensiveSuppressionRisk,
+    ),
+    offensive_support_score: withDefault(
+      "offensive_support_score",
+      input.hitGameContext?.offensiveSupportScore,
+    ),
+    hit_context_boost: withDefault(
+      "hit_context_boost",
+      input.hitGameContext?.hitContextBoost,
+    ),
+    hit_context_penalty: withDefault(
+      "hit_context_penalty",
+      input.hitGameContext?.hitContextPenalty,
+    ),
+    expected_plate_appearance_environment: withDefault(
+      "expected_plate_appearance_environment",
+      input.hitGameContext?.expectedPlateAppearanceEnvironment,
+    ),
+    hitter_team_run_support_index: withDefault(
+      "hitter_team_run_support_index",
+      input.hitGameContext?.hitterTeamRunSupportIndex,
     ),
   } satisfies MlHitFeatureVector;
 

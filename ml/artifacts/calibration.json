@@ -1,0 +1,98 @@
+{
+  "generatedAt": "2026-05-02T16:57:13.915260+00:00",
+  "runtimeModel": "logistic_regression",
+  "brierScore": 0.230840440700714,
+  "logLoss": 0.6543229596386706,
+  "accuracy": 0.6384180790960452,
+  "rocAuc": 0.5,
+  "calibration": [
+    {
+      "bucket": "(0.6, 0.7]",
+      "count": 177,
+      "avg_probability": 0.6383451314915484,
+      "observed_rate": 0.6384180790960452
+    }
+  ],
+  "sourceProbabilityCalibration": {
+    "accepted": false,
+    "reason": "calibrated validation metrics did not improve raw saved probabilities",
+    "baselineMetrics": {
+      "accuracy": 0.6045197740112994,
+      "log_loss": 0.6444847146169934,
+      "brier_score": 0.22646933132478003,
+      "calibration": [
+        {
+          "bucket": "(0.3, 0.4]",
+          "count": 9,
+          "avg_probability": 0.37659343937196293,
+          "observed_rate": 0.5555555555555556
+        },
+        {
+          "bucket": "(0.4, 0.5]",
+          "count": 17,
+          "avg_probability": 0.4776752101239815,
+          "observed_rate": 0.6470588235294118
+        },
+        {
+          "bucket": "(0.5, 0.6]",
+          "count": 70,
+          "avg_probability": 0.5481867068482748,
+          "observed_rate": 0.5428571428571428
+        },
+        {
+          "bucket": "(0.6, 0.7]",
+          "count": 65,
+          "avg_probability": 0.6471510586576645,
+          "observed_rate": 0.6923076923076923
+        },
+        {
+          "bucket": "(0.7, 0.8]",
+          "count": 16,
+          "avg_probability": 0.7274575557313989,
+          "observed_rate": 0.875
+        }
+      ],
+      "threshold_50": {
+        "threshold": 0.5,
+        "true_positive": 97,
+        "false_positive": 54,
+        "true_negative": 10,
+        "false_negative": 16
+      },
+      "roc_auc": 0.6147676991150443
+    },
+    "candidateMetrics": {
+      "accuracy": 0.6384180790960452,
+      "log_loss": 0.6664392281009801,
+      "brier_score": 0.23631116461048965,
+      "calibration": [
+        {
+          "bucket": "(0.5, 0.6]",
+          "count": 1,
+          "avg_probability": 0.5997412488267151,
+          "observed_rate": 0.0
+        },
+        {
+          "bucket": "(0.6, 0.7]",
+          "count": 167,
+          "avg_probability": 0.6514566038900277,
+          "observed_rate": 0.6467065868263473
+        },
+        {
+          "bucket": "(0.7, 0.8]",
+          "count": 9,
+          "avg_probability": 0.7134074238139635,
+          "observed_rate": 0.5555555555555556
+        }
+      ],
+      "threshold_50": {
+        "threshold": 0.5,
+        "true_positive": 113,
+        "false_positive": 64,
+        "true_negative": 0,
+        "false_negative": 0
+      },
+      "roc_auc": 0.38523230088495575
+    }
+  }
+}

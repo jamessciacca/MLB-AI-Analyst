@@ -9,6 +9,8 @@
     "start": "next start",
     "chat": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/agent/terminalRunner.ts",
     "export:resolved": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/export_resolved_predictions.ts",
+    "export:feedback-training": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/exportFeedbackTrainingData.ts",
+    "eval:hit-context": "python3 ml/evaluate_hit_game_context.py --input data/player_game_training.csv --output data/evaluation/hit_context_eval.json",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs"
   },

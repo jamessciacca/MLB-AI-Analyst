@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import {
   type KeyboardEvent,
   useDeferredValue,
@@ -18,6 +19,9 @@ import {
   type LineupComparisonResult,
   type PlayerSearchResult,
 } from "@/lib/types";
+import { type AnalystPredictionResult } from "@/lib/analyst/types";
+import { normalizeAmericanOddsInput } from "@/lib/odds-math";
+import { type PredictionExplanation } from "@/lib/prediction/explanation-builder";
 
 type SearchResponse = {
   players: PlayerSearchResult[];
@@ -30,6 +34,10 @@ type GamesResponse = {
 };
 
 type GameWinPredictionResponse = GameWinPredictionResult & { error?: string };
+type AnalysisResponse = AnalysisResult & {
+  analystEngine?: AnalystPredictionResult | null;
+  explainability?: PredictionExplanation | null;
+};
 
 type FeedbackRating = "correct" | "too_high" | "too_low";
 type ColorTheme = "light" | "dark";
@@ -47,6 +55,8 @@ const THEME_STORAGE_KEY = "mlb-analyst-theme";
 const THEME_CHANGE_EVENT = "mlb-analyst-theme-change";
 const PARLAY_FLOATING_BREAKPOINT_QUERY = "(max-width: 1600px)";
 const SCHEDULE_REFRESH_MS = 2 * 60 * 1000;
+const DRAFTKINGS_TOOLTIP_TEXT =
+  "Optional. DraftKings only. If you enter a line here, it will be used automatically in the analysis.";
 
 function getInitialParlayCollapsed() {
   if (typeof window === "undefined") {
@@ -58,11 +68,11 @@ function getInitialParlayCollapsed() {
 
 function getStoredTheme(): ColorTheme {
   if (typeof window === "undefined") {
-    return "light";
+    return "dark";
   }
 
   const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return storedTheme === "dark" || storedTheme === "light" ? storedTheme : "light";
+  return storedTheme === "dark" || storedTheme === "light" ? storedTheme : "dark";
 }
 
 function subscribeToThemeChanges(callback: () => void) {
@@ -82,6 +92,63 @@ function setStoredTheme(theme: ColorTheme) {
 
 function formatPercent(value: number, digits = 0) {
   return `${(value * 100).toFixed(digits)}%`;
+}
+
+function formatAmericanOdds(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function formatSignedPercent(value: number | null | undefined, digits = 1) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+
+  return `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`;
+}
+
+function displayedMarketProbability(analyst: AnalystPredictionResult | null | undefined) {
+  return analyst?.noVigMarketProbability ?? analyst?.sportsbookImpliedProbability ?? null;
+}
+
+function valueToneClass(valueRating: string | null | undefined) {
+  if (valueRating === "strong positive value" || valueRating === "positive value") {
+    return "positive";
+  }
+  if (valueRating === "overpriced" || valueRating === "bad value") {
+    return "negative";
+  }
+  if (valueRating === "no odds available") {
+    return "unavailable";
+  }
+  if (valueRating === "fair/no clear edge") {
+    return "neutral";
+  }
+
+  return "neutral";
+}
+
+function formatPercentMaybe(value: number | null | undefined, digits = 1) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+
+  return formatPercent(value, digits);
+}
+
+function oddsSummaryText(analyst: AnalystPredictionResult) {
+  if (analyst.manualOdds) {
+    return `The model projects this hitter at ${formatPercent(analyst.predictedProbability, 1)}. The manually entered ${analyst.manualOdds.sportsbook ?? "sportsbook"} line of ${formatAmericanOdds(analyst.manualOdds.normalizedOdds)} implies ${formatPercent(analyst.manualOdds.impliedProbability, 1)}, leaving an estimated ${formatSignedPercent(analyst.manualOdds.edge, 1)} edge.`;
+  }
+
+  if (analyst.sportsbookOdds === null || analyst.sportsbookOdds === undefined) {
+    return "No sportsbook odds entered. Add odds manually to calculate edge and value against the model.";
+  }
+
+  return `Model: ${formatPercent(analyst.predictedProbability, 1)} | Market: ${formatPercent(displayedMarketProbability(analyst) ?? analyst.sportsbookImpliedProbability ?? 0, 1)} | Fair odds: ${formatAmericanOdds(analyst.fairOdds)} | Sportsbook: ${formatAmericanOdds(analyst.sportsbookOdds)} | Edge: ${formatSignedPercent(analyst.edgeIfAvailable, 1)}`;
 }
 
 function formatOptionalNumber(value: number | null | undefined, digits = 1) {
@@ -135,7 +202,13 @@ function formatShortDate(date: string) {
 }
 
 function getMarketLabel(market: AnalysisMarket) {
-  return market === "home_run" ? "Home Run" : "Hit";
+  if (market === "home_run") {
+    return "Home Run";
+  }
+  if (market === "hit_2_plus") {
+    return "2+ Hits";
+  }
+  return "Hit";
 }
 
 
@@ -492,9 +565,9 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const [games, setGames] = useState<GameSummary[]>([]);
   const [scheduleUpdatedAt, setScheduleUpdatedAt] = useState<string | null>(null);
   const [selectedGamePk, setSelectedGamePk] = useState<number | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [lineupDetailAnalysis, setLineupDetailAnalysis] =
-    useState<AnalysisResult | null>(null);
+    useState<AnalysisResponse | null>(null);
   const [lineupComparison, setLineupComparison] = useState<LineupComparisonResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
@@ -510,6 +583,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
   const [pendingDetailScrollId, setPendingDetailScrollId] = useState<string | null>(null);
   const [isAuditingOutcomes, setIsAuditingOutcomes] = useState(false);
   const [showModelDetails, setShowModelDetails] = useState(false);
+  const [manualOddsInput, setManualOddsInput] = useState("");
   const [showScheduleMenu, setShowScheduleMenu] = useState(false);
   const [showScheduleOverlay, setShowScheduleOverlay] = useState(false);
   const [showScheduleDateMenu, setShowScheduleDateMenu] = useState(false);
@@ -736,11 +810,124 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     return () => window.clearTimeout(scrollTimer);
   }, [analysisId, detailLoadingPlayerId, pendingDetailScrollId]);
 
+  useEffect(() => {
+    if (!analysis) {
+      return;
+    }
+
+    const currentInput = manualOddsInput.trim();
+    const appliedInput = analysis.analystEngine?.manualOdds?.originalInput?.trim() ?? "";
+
+    if (currentInput === appliedInput) {
+      return;
+    }
+
+    if (!currentInput && !analysis.analystEngine?.manualOdds) {
+      return;
+    }
+
+    const parsedManualOdds = currentInput ? normalizeAmericanOddsInput(currentInput) : null;
+
+    if (
+      parsedManualOdds &&
+      (!parsedManualOdds.ok || (parsedManualOdds.value.sportsbook && parsedManualOdds.value.sportsbook !== "DraftKings"))
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch("/api/analyze", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              playerId: analysis.hitter.player.id,
+              gamePk: analysis.game.gamePk,
+              market: analysis.market,
+              ...(parsedManualOdds?.ok
+                ? {
+                    manualOdds: parsedManualOdds.value.originalInput,
+                    sportsbookOdds: parsedManualOdds.value.normalizedOdds,
+                    sportsbook: "DraftKings",
+                  }
+                : {}),
+            }),
+          });
+
+          const data = (await response.json()) as AnalysisResult & { error?: string };
+
+          if (!response.ok) {
+            throw new Error(data.error ?? "Unable to refresh analysis.");
+          }
+
+          if (!cancelled) {
+            setAnalysis(data);
+          }
+        } catch (refreshError) {
+          if (!cancelled) {
+            setError(
+              refreshError instanceof Error
+                ? refreshError.message
+                : "Unable to refresh analysis.",
+            );
+          }
+        }
+      })();
+    }, 450);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [analysis, manualOddsInput]);
+
   function selectPlayer(player: PlayerSearchResult) {
     setSelectedPlayer(player);
     setQuery(player.fullName);
     setPlayers([]);
     setActivePlayerIndex(-1);
+    clearActiveResults();
+  }
+
+  function resolveManualOddsPayload() {
+    const rawInput = manualOddsInput.trim();
+
+    if (!rawInput) {
+      return {
+        ok: true as const,
+        value: null,
+      };
+    }
+
+    const parsed = normalizeAmericanOddsInput(rawInput);
+
+    if (!parsed.ok) {
+      return parsed;
+    }
+
+    if (parsed.value.sportsbook && parsed.value.sportsbook !== "DraftKings") {
+      return {
+        ok: false as const,
+        error: "Only DraftKings manual odds are supported right now.",
+        originalInput: parsed.value.originalInput,
+      };
+    }
+
+    return {
+      ok: true as const,
+      value: {
+        manualOdds: parsed.value.originalInput,
+        sportsbookOdds: parsed.value.normalizedOdds,
+        sportsbook: "DraftKings",
+      },
+    };
+  }
+
+  function clearActiveResults() {
     setAnalysis(null);
     setLineupDetailAnalysis(null);
     setLineupComparison(null);
@@ -805,7 +992,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
         }),
       });
 
-      const data = (await response.json()) as AnalysisResult & { error?: string };
+      const data = (await response.json()) as AnalysisResponse & { error?: string };
 
       if (!response.ok) {
         throw new Error(data.error ?? "Unable to build player details.");
@@ -854,14 +1041,36 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     }
   }
 
-  async function analyze() {
-    if (!selectedPlayer || !selectedGamePk) {
+  async function runAnalysisRequest({
+    playerId,
+    gamePk,
+    market,
+    clearExisting = false,
+    showLoadingState = false,
+  }: {
+    playerId: number;
+    gamePk: number;
+    market: AnalysisMarket;
+    clearExisting?: boolean;
+    showLoadingState?: boolean;
+  }) {
+    const manualOddsPayload = resolveManualOddsPayload();
+
+    if (!manualOddsPayload.ok) {
+      if (showLoadingState) {
+        setError(manualOddsPayload.error);
+      }
       return;
     }
 
-    const gamePk = selectedGamePk;
+    if (clearExisting) {
+      clearActiveResults();
+    }
 
-    setIsAnalyzing(true);
+    if (showLoadingState) {
+      setIsAnalyzing(true);
+    }
+
     setError(null);
     setFeedbackStatus(null);
 
@@ -872,9 +1081,10 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          playerId: selectedPlayer.id,
+          playerId,
           gamePk,
-          market: selectedMarket,
+          market,
+          ...(manualOddsPayload.value ?? {}),
         }),
       });
 
@@ -886,10 +1096,6 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
       setAnalysis(data);
       setLineupComparison(null);
-      setQuery("");
-      setPlayers([]);
-      setSelectedPlayer(null);
-      setSelectedGamePk(null);
     } catch (analysisError) {
       setError(
         analysisError instanceof Error
@@ -897,8 +1103,24 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           : "Unable to build analysis.",
       );
     } finally {
-      setIsAnalyzing(false);
+      if (showLoadingState) {
+        setIsAnalyzing(false);
+      }
     }
+  }
+
+  async function analyze() {
+    if (!selectedPlayer || !selectedGamePk) {
+      return;
+    }
+
+    await runAnalysisRequest({
+      playerId: selectedPlayer.id,
+      gamePk: selectedGamePk,
+      market: selectedMarket,
+      clearExisting: true,
+      showLoadingState: true,
+    });
   }
 
   async function compareLineup(market: AnalysisMarket) {
@@ -908,6 +1130,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
     const gamePk = selectedGamePk;
 
+    clearActiveResults();
     setIsComparingLineup(true);
     setLineupComparisonMarket(market);
     setError(null);
@@ -933,10 +1156,6 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
 
       setLineupComparison(data);
       setAnalysis(data.topPick);
-      setQuery("");
-      setPlayers([]);
-      setSelectedPlayer(null);
-      setSelectedGamePk(null);
     } catch (comparisonError) {
       setError(
         comparisonError instanceof Error
@@ -954,6 +1173,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
       return;
     }
 
+    clearActiveResults();
     setGameWinnerLoadingPk(gamePk);
     setError(null);
     setFeedbackStatus(null);
@@ -1120,9 +1340,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
     setExpandedLineupGamePk(null);
     setShowScheduleDateMenu(false);
     setShowScheduleOverlay(false);
-    setAnalysis(null);
-    setLineupDetailAnalysis(null);
-    setLineupComparison(null);
+    clearActiveResults();
     setError(null);
   }
 
@@ -1220,8 +1438,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   }`}
                   onClick={() => {
                     setSelectedGamePk(game.gamePk);
-                    setAnalysis(null);
-                    setLineupComparison(null);
+                    clearActiveResults();
                     setError(null);
                     setShowScheduleMenu(false);
                     if (expanded) {
@@ -1234,8 +1451,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       setSelectedGamePk(game.gamePk);
-                      setAnalysis(null);
-                      setLineupComparison(null);
+                      clearActiveResults();
                       setError(null);
                       setShowScheduleMenu(false);
                       if (expanded) {
@@ -1287,8 +1503,10 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <span>{formatGameType(game.dayNight)}</span>
                   </div>
 
-                  {hasGameScore(game) && isInProgressGame(game) ? (
-                    <div className="final-score-strip live-score-strip">
+                  {hasGameScore(game) ? (
+                    <div
+                      className={`final-score-strip${isInProgressGame(game) ? " live-score-strip" : ""}`}
+                    >
                       <span
                         className={
                           getGameWinner(game) === "away"
@@ -1837,14 +2055,6 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           <div className="hero-copy">
             <div className="hero-topline">
               <p className="eyebrow">2026 Live Data + 2025 Stabilization</p>
-              <button
-                type="button"
-                className="theme-toggle"
-                aria-pressed={colorTheme === "dark"}
-                onClick={() => setStoredTheme(colorTheme === "dark" ? "light" : "dark")}
-              >
-                {colorTheme === "dark" ? "Day Mode" : "Night Mode"}
-              </button>
             </div>
             <h1>MLB Analyst AI</h1>
             <p>
@@ -1885,6 +2095,23 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 <strong>Pitcher, weather, park</strong>
               </div>
             </div>
+
+            <div className="hero-action-row hero-showcase-action-row">
+              <Link href="/hit-analyst" className="theme-toggle theme-toggle-link">
+                MLB Hit Analyst
+              </Link>
+              <Link href="/keepsakes" className="theme-toggle theme-toggle-link">
+                Slip Keepsakes
+              </Link>
+              <button
+                type="button"
+                className="theme-toggle"
+                aria-pressed={colorTheme === "dark"}
+                onClick={() => setStoredTheme(colorTheme === "dark" ? "light" : "dark")}
+              >
+                {colorTheme === "dark" ? "Day Mode" : "Night Mode"}
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -1894,9 +2121,9 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
           <div className="panel controls-main panel-command">
           <div className="panel-heading-row">
             <div>
-              <h2>Search And Analyze</h2>
+              <h2>Search and Analyze</h2>
               <p className="muted">
-                Search one hitter or compare the published starters for the selected game.
+                Search a hitter, set the matchup, and run either a player projection or a game-wide tool.
               </p>
             </div>
             <div className="panel-actions">
@@ -2038,7 +2265,10 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
             </div>
           ) : null}
 
-          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", marginTop: "1rem" }}>
+          <div
+            className="grid"
+            style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", marginTop: "1rem" }}
+          >
             <div className="input-group">
               <label className="field-label" htmlFor="market-select">
                 Outcome
@@ -2049,11 +2279,11 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 value={selectedMarket}
                 onChange={(event) => {
                   setSelectedMarket(event.target.value as AnalysisMarket);
-                  setAnalysis(null);
-                  setLineupComparison(null);
+                  clearActiveResults();
                 }}
               >
                 <option value="hit">Hit Probability</option>
+                <option value="hit_2_plus">2+ Hits Probability</option>
                 <option value="home_run">Home Run Probability</option>
               </select>
             </div>
@@ -2083,8 +2313,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                 value={selectedGamePk ?? ""}
                 onChange={(event) => {
                   setSelectedGamePk(event.target.value ? Number(event.target.value) : null);
-                  setAnalysis(null);
-                  setLineupComparison(null);
+                  clearActiveResults();
                 }}
               >
                 <option value="">Choose a game</option>
@@ -2094,6 +2323,23 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div className="input-group">
+              <label className="field-label" htmlFor="manual-odds-input">
+                DraftKings Odds
+              </label>
+              <input
+                id="manual-odds-input"
+                className="text-input"
+                inputMode="numeric"
+                placeholder="-135, +120, 120, DK -135"
+                value={manualOddsInput}
+                onChange={(event) => {
+                  setManualOddsInput(event.target.value);
+                  setError(null);
+                }}
+              />
             </div>
           </div>
 
@@ -2388,21 +2634,116 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
             ) : null}
 
             {lineupComparison?.topPick ? (
-              <div className="panel lineup-comparison-panel">
+              <div className="panel lineup-comparison-panel analyst-readable-panel">
                 <p className="eyebrow">Starting Lineup Comparison</p>
                 <h2>
                   Best {lineupComparison.marketLabel.toLowerCase()} target:{" "}
                   {formatPlayerNameWithBatSide(lineupComparison.topPick.hitter.player)}
                 </h2>
                 <p className="muted">
-                  The cards below rank the published starters by the model&apos;s projected
-                  {` ${lineupComparison.marketLabel.toLowerCase()} probability`} and explain the
-                  main reasons behind each number.
+                  {lineupComparison.selection
+                    ? lineupComparison.selection.analystNarrative.analystParagraph
+                    : `The cards below rank the published starters by the model's projected ${lineupComparison.marketLabel.toLowerCase()} probability and explain the main reasons behind each number.`}
                 </p>
+
+                {lineupComparison.selection ? (
+                  <>
+                    <div className="stat-strip analyst-stat-strip">
+                      <div className="stat-box">
+                        <span className="field-label">Selected Player</span>
+                        <strong>{lineupComparison.selection.selectedHitter}</strong>
+                      </div>
+                      <div className="stat-box">
+                        <span className="field-label">Hit Probability</span>
+                        <strong>{formatPercent(lineupComparison.selection.hitProbability)}</strong>
+                      </div>
+                      <div className="stat-box">
+                        <span className="field-label">Confidence</span>
+                        <strong>{lineupComparison.selection.confidence}</strong>
+                      </div>
+                      <div className="stat-box">
+                        <span className="field-label">Recommendation</span>
+                        <strong>{lineupComparison.selection.recommendation}</strong>
+                      </div>
+                    </div>
+
+                    <div className="percentage-guide-grid analyst-insight-grid">
+                      <div>
+                        <h3>Why This Player?</h3>
+                        <ul className="compact-list">
+                          {lineupComparison.selection.whyHeStandsOut.map((reason) => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <h3>Why Not The Obvious Star?</h3>
+                        <ul className="compact-list">
+                          {(lineupComparison.selection.whyNotTheStarPlayer.length > 0
+                            ? lineupComparison.selection.whyNotTheStarPlayer
+                            : ["The top star still rated as the best pick, and the model had real evidence for it."]).map((reason) => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="snapshot-grid analyst-snapshot-grid" style={{ marginTop: "1rem" }}>
+                      <div className="panel snapshot-card">
+                        <h3>Analyst Explanation</h3>
+                        <p className="muted">
+                          {lineupComparison.selection.analystNarrative.quickSummary}
+                        </p>
+                        <ul className="snapshot-list">
+                          {lineupComparison.selection.analystNarrative.keyStats.map((stat) => (
+                            <li key={stat}>{stat}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="panel snapshot-card">
+                        <h3>Top Alternatives</h3>
+                        <ul className="snapshot-list">
+                          {lineupComparison.selection.topAlternatives.map((entry) => (
+                            <li key={entry.playerId}>
+                              {entry.playerName}: {formatPercent(entry.hitProbability, 1)} hit,{" "}
+                              {entry.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="panel snapshot-card">
+                        <h3>Risk Warning</h3>
+                        <ul className="snapshot-list">
+                          {(lineupComparison.selection.risks.length > 0
+                            ? lineupComparison.selection.risks
+                            : ["No extra risk note rose above normal variance."]).map((risk) => (
+                            <li key={risk}>{risk}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="panel snapshot-card">
+                        <h3>Confidence</h3>
+                        <p className="muted">
+                          {lineupComparison.selection.analystNarrative.confidenceExplanation}
+                        </p>
+                        {lineupComparison.selection.dataWarnings.length > 0 ? (
+                          <ul className="snapshot-list">
+                            {lineupComparison.selection.dataWarnings.map((warning) => (
+                              <li key={warning}>{warning}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    </div>
+                  </>
+                ) : null}
 
                 <div className="lineup-pick-grid">
                   {lineupComparison.players.slice(0, 8).map((entry, index) => {
                     const tone = getAnalysisTone(entry);
+                    const selectionEntry = lineupComparison.selection?.comparisonTable.find(
+                      (candidate) => candidate.playerId === entry.hitter.player.id,
+                    );
 
                     return (
                       <div key={entry.analysisId} className={`lineup-pick-card ${tone}`}>
@@ -2447,9 +2788,14 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                           <span>Slot {entry.hitter.lineupSlot ?? "n/a"}</span>
                           <ConfidenceLabel confidence={entry.confidence} />
                           <span>{entry.probabilities.expectedAtBats.toFixed(1)} exp AB</span>
+                          {selectionEntry ? (
+                            <span>Score {selectionEntry.finalScore.toFixed(2)}</span>
+                          ) : null}
                         </div>
 
-                        <p className="lineup-pick-reason">{buildPlayerCardReason(entry)}</p>
+                        <p className="lineup-pick-reason">
+                          {selectionEntry?.reason ?? buildPlayerCardReason(entry)}
+                        </p>
 
                         <div className="comparison-card-actions">
                           <button
@@ -2565,7 +2911,7 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                     <span className="field-label">Expected ABs</span>
                     <strong>{analysis.probabilities.expectedAtBats.toFixed(1)}</strong>
                   </div>
-                  {analysis.market === "hit" ? (
+                  {analysis.market === "hit" || analysis.market === "hit_2_plus" ? (
                     <>
                       <div className="stat-box">
                         <span className="field-label">Expected Hits</span>
@@ -2715,6 +3061,268 @@ export function MlbAnalystApp({ defaultDate }: { defaultDate: string }) {
                   </div>
                 )}
               </div>
+
+              {analysis.analystEngine ? (
+                <div className="panel summary-card debug-context-card analyst-readable-panel">
+                  <div className="debug-context-header">
+                    <div>
+                      <h2>MLB Analyst Engine</h2>
+                      <p className="muted">{analysis.analystEngine.summary}</p>
+                    </div>
+                  </div>
+
+                  <div className="stat-strip analyst-stat-strip">
+                    <div className="stat-box">
+                      <span className="field-label">Analyst %</span>
+                      <strong>{formatPercent(analysis.analystEngine.predictedProbability)}</strong>
+                    </div>
+                    <div className="stat-box">
+                      <span className="field-label">Confidence</span>
+                      <strong>{analysis.analystEngine.confidence}</strong>
+                    </div>
+                    <div className="stat-box">
+                      <span className="field-label">Lean</span>
+                      <strong>{analysis.analystEngine.recommendation}</strong>
+                    </div>
+                    <div className="stat-box">
+                      <span className="field-label">Fair Odds</span>
+                      <strong>{formatAmericanOdds(analysis.analystEngine.fairOdds)}</strong>
+                    </div>
+                    <div className="stat-box">
+                      <span className="field-label">Team Win</span>
+                      <strong>
+                        {formatPercent(analysis.analystEngine.gameScript.teamWinProbability)}
+                      </strong>
+                    </div>
+                    <div className="stat-box">
+                      <span className="field-label">Blowout Risk</span>
+                      <strong>{formatPercent(analysis.analystEngine.gameScript.blowoutRisk)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="odds-summary-grid">
+                    <div className="panel odds-summary-card">
+                      <div className="odds-summary-heading">
+                        <h3>Odds And Value</h3>
+                        <span
+                          className={`value-pill ${valueToneClass(analysis.analystEngine.manualOdds?.valueRating ?? analysis.analystEngine.valueRating)}`}
+                        >
+                          {analysis.analystEngine.manualOdds?.valueRating ?? analysis.analystEngine.valueRating}
+                        </span>
+                      </div>
+                      <div className="odds-summary-lines">
+                        <div className="odds-summary-line">
+                          <span>Model Probability</span>
+                          <strong>{formatPercent(analysis.analystEngine.predictedProbability, 1)}</strong>
+                        </div>
+                        <div className="odds-summary-line">
+                          <span>
+                            {analysis.analystEngine.manualOdds ? "Your Odds" : "Sportsbook Odds"}
+                          </span>
+                          <strong>{formatAmericanOdds(analysis.analystEngine.sportsbookOdds)}</strong>
+                        </div>
+                        <div className="odds-summary-line">
+                          <span>
+                            {analysis.analystEngine.manualOdds ? "Sportsbook" : "Book Implied"}
+                          </span>
+                          <strong>
+                            {analysis.analystEngine.manualOdds
+                              ? analysis.analystEngine.manualOdds.sportsbook ?? "DraftKings"
+                              : formatPercentMaybe(
+                                  analysis.analystEngine.sportsbookImpliedProbability,
+                                  1,
+                                )}
+                          </strong>
+                        </div>
+                        <div className="odds-summary-line">
+                          <span>
+                            {analysis.analystEngine.manualOdds ? "Implied Probability" : "No-Vig Market"}
+                          </span>
+                          <strong>
+                            {analysis.analystEngine.manualOdds
+                              ? formatPercent(analysis.analystEngine.manualOdds.impliedProbability, 1)
+                              : formatPercentMaybe(
+                                  analysis.analystEngine.noVigMarketProbability,
+                                  1,
+                                )}
+                          </strong>
+                        </div>
+                        <div className="odds-summary-line">
+                          <span>Fair Odds</span>
+                          <strong>{formatAmericanOdds(analysis.analystEngine.fairOdds)}</strong>
+                        </div>
+                        <div className="odds-summary-line">
+                          <span>Edge</span>
+                          <strong>
+                            {formatSignedPercent(
+                              analysis.analystEngine.manualOdds?.edge ??
+                                analysis.analystEngine.edgeIfAvailable,
+                              1,
+                            )}
+                          </strong>
+                        </div>
+                      </div>
+                      <p className="odds-summary-copy">
+                        {oddsSummaryText(analysis.analystEngine)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="percentage-guide-grid analyst-insight-grid">
+                    <div>
+                      <h3>Why It Likes It</h3>
+                      <ul className="compact-list">
+                        {(analysis.analystEngine.topReasonsFor.length > 0
+                          ? analysis.analystEngine.topReasonsFor
+                          : ["No major positive edge surfaced beyond the baseline model."]).map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <h3>What It Fears</h3>
+                      <ul className="compact-list">
+                        {(analysis.analystEngine.topReasonsAgainst.length > 0
+                          ? analysis.analystEngine.topReasonsAgainst
+                          : ["No major negative flag surfaced beyond standard variance."]).map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+
+                  <div className="snapshot-grid analyst-snapshot-grid" style={{ marginTop: "1rem" }}>
+                    <div className="panel snapshot-card">
+                      <h3>Game Script</h3>
+                      <ul className="snapshot-list">
+                        <li>Summary: {analysis.analystEngine.gameScript.summary}</li>
+                        <li>
+                          Implied runs: {analysis.analystEngine.gameScript.impliedRuns.toFixed(1)}
+                        </li>
+                        <li>
+                          Opp implied runs:{" "}
+                          {analysis.analystEngine.gameScript.opponentImpliedRuns.toFixed(1)}
+                        </li>
+                        <li>
+                          Likely winner:{" "}
+                          {analysis.analystEngine.gameScript.likelyWinningTeam ?? "n/a"}
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div className="panel snapshot-card">
+                      <h3>Environment</h3>
+                      <ul className="snapshot-list">
+                        <li>{analysis.analystEngine.environment.summary}</li>
+                        <li>
+                          Wind: {analysis.analystEngine.environment.windImpact}
+                        </li>
+                        <li>
+                          Ballpark hit factor:{" "}
+                          {analysis.analystEngine.environment.ballpark.hitFactor.toFixed(2)}
+                        </li>
+                        <li>
+                          Ballpark HR factor:{" "}
+                          {analysis.analystEngine.environment.ballpark.homeRunFactor.toFixed(2)}
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div className="panel snapshot-card">
+                      <h3>Vegas Context</h3>
+                      <ul className="snapshot-list">
+                        <li>
+                          Source: {analysis.analystEngine.vegas?.source ?? "unavailable"}
+                        </li>
+                        <li>
+                          Home line:{" "}
+                          {formatAmericanOdds(analysis.analystEngine.vegas?.homeMoneyline)}
+                        </li>
+                        <li>
+                          Away line:{" "}
+                          {formatAmericanOdds(analysis.analystEngine.vegas?.awayMoneyline)}
+                        </li>
+                        <li>
+                          Total:{" "}
+                          {analysis.analystEngine.vegas?.totalRuns !== null &&
+                          analysis.analystEngine.vegas?.totalRuns !== undefined
+                            ? analysis.analystEngine.vegas.totalRuns.toFixed(1)
+                            : "n/a"}
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div className="panel snapshot-card">
+                      <h3>Data Quality</h3>
+                      <ul className="snapshot-list">
+                        <li>
+                          Sources: {analysis.analystEngine.dataQuality.sourcesUsed.join(", ")}
+                        </li>
+                        <li>
+                          Missing:{" "}
+                          {analysis.analystEngine.dataQuality.missingFields.length > 0
+                            ? analysis.analystEngine.dataQuality.missingFields.join(", ")
+                            : "none"}
+                        </li>
+                        <li>
+                          Warnings:{" "}
+                          {analysis.analystEngine.dataQuality.warnings.length > 0
+                            ? analysis.analystEngine.dataQuality.warnings.slice(0, 2).join(" | ")
+                            : "none"}
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {analysis.explainability ? (
+                <div className="panel summary-card debug-context-card analyst-readable-panel">
+                  <div className="debug-context-header">
+                    <div>
+                      <h2>Betting Analyst Read</h2>
+                      <p className="muted">{analysis.explainability.whyThisPick}</p>
+                    </div>
+                  </div>
+                  <div className="snapshot-grid analyst-snapshot-grid" style={{ marginTop: 0 }}>
+                    <div className="panel snapshot-card">
+                      <h3>Why This Pick?</h3>
+                      <ul className="snapshot-list">
+                        {analysis.explainability.topPositiveFactors.map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="panel snapshot-card">
+                      <h3>Risk Factors</h3>
+                      <ul className="snapshot-list">
+                        {analysis.explainability.topNegativeFactors.map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="panel snapshot-card">
+                      <h3>Vegas Odds Comparison</h3>
+                      <p className="muted">
+                        {analysis.explainability.vegasComparison ??
+                          "Enter DraftKings odds to compare the model probability against sportsbook implied probability."}
+                      </p>
+                    </div>
+                    <div className="panel snapshot-card">
+                      <h3>Missing Data</h3>
+                      <ul className="snapshot-list">
+                        {(analysis.explainability.missingData.length > 0
+                          ? analysis.explainability.missingData
+                          : ["No major data gaps were detected for this prediction."]).map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                  <p className="muted">{analysis.explainability.safetyNote}</p>
+                </div>
+              ) : null}
+
             </div>
 
             <div className="factor-grid">

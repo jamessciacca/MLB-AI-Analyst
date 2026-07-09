@@ -1,8 +1,13 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { type AnalysisMarket, type AnalysisResult } from "@/lib/types";
-import { clamp } from "@/lib/utils";
+import {
+  buildPredictionFeatureSnapshot,
+  getPredictionFeatureNames,
+  type PredictionFeatureSnapshot,
+} from "./prediction/prediction-features.ts";
+import { type AnalysisMarket, type AnalysisResult } from "./types.ts";
+import { clamp } from "./utils.ts";
 
 type FeedbackRating = "correct" | "too_high" | "too_low";
 type Recommendation = "good play" | "neutral" | "avoid";
@@ -17,6 +22,8 @@ type FeedbackEntry = {
   rating: FeedbackRating;
   savedAt: string;
   source?: "manual" | "auto_outcome";
+  odds?: PredictionOddsSnapshot | null;
+  featureSnapshot?: PredictionFeatureSnapshot | null;
 };
 
 export type SavedPredictionFeedback = FeedbackEntry;
@@ -32,6 +39,15 @@ export type PredictionEntry = {
   modelVersion: string;
   generatedAt: string;
   savedAt: string;
+  odds?: PredictionOddsSnapshot | null;
+  featureSnapshot?: PredictionFeatureSnapshot | null;
+};
+
+export type PredictionOddsSnapshot = {
+  originalInput?: string | null;
+  normalizedOdds?: number | null;
+  impliedProbability?: number | null;
+  sportsbook?: string | null;
 };
 
 export type OutcomeFeedbackEntry = FeedbackEntry & {
@@ -64,6 +80,7 @@ const DATA_DIRECTORY = path.join(process.cwd(), "data");
 const FEEDBACK_PATH = path.join(DATA_DIRECTORY, "feedback.ndjson");
 const PREDICTIONS_PATH = path.join(DATA_DIRECTORY, "predictions.ndjson");
 const OUTCOME_FEEDBACK_PATH = path.join(DATA_DIRECTORY, "outcome-feedback.ndjson");
+const PLAYER_GAME_TRAINING_PATH = path.join(DATA_DIRECTORY, "player_game_training.csv");
 const MAX_FEEDBACK_ROWS = 100;
 
 function isoDateKey(value: string) {
@@ -83,7 +100,9 @@ function isFeedbackEntry(value: unknown): value is FeedbackEntry {
     typeof entry.analysisId === "string" &&
     typeof entry.playerId === "number" &&
     typeof entry.gamePk === "number" &&
-    (entry.market === "hit" || entry.market === "home_run") &&
+    (entry.market === "hit" ||
+      entry.market === "hit_2_plus" ||
+      entry.market === "home_run") &&
     typeof entry.probability === "number" &&
     (entry.recommendation === "good play" ||
       entry.recommendation === "neutral" ||
@@ -119,7 +138,9 @@ function isPredictionEntry(value: unknown): value is PredictionEntry {
     typeof entry.playerId === "number" &&
     typeof entry.playerName === "string" &&
     typeof entry.gamePk === "number" &&
-    (entry.market === "hit" || entry.market === "home_run") &&
+    (entry.market === "hit" ||
+      entry.market === "hit_2_plus" ||
+      entry.market === "home_run") &&
     typeof entry.probability === "number" &&
     (entry.recommendation === "good play" ||
       entry.recommendation === "neutral" ||
@@ -195,7 +216,7 @@ function summarizeMarketFeedback(entries: FeedbackEntry[], market: AnalysisMarke
   const tooHighCount = marketEntries.filter((entry) => entry.rating === "too_high").length;
   const tooLowCount = marketEntries.filter((entry) => entry.rating === "too_low").length;
   const correctCount = marketEntries.filter((entry) => entry.rating === "correct").length;
-  const maxAdjustment = market === "home_run" ? 0.006 : 0.012;
+  const maxAdjustment = market === "home_run" ? 0.006 : market === "hit_2_plus" ? 0.009 : 0.012;
   const confidence = clamp(sampleSize / 20, 0, 1);
   const netDirection = sampleSize > 0 ? (tooLowCount - tooHighCount) / sampleSize : 0;
 
@@ -230,12 +251,16 @@ export async function getFeedbackCalibrationSummary() {
     autoOutcomeEntries: outcomeEntries.length,
     markets: {
       hit: summarizeMarketFeedback(entries, "hit"),
+      hit_2_plus: summarizeMarketFeedback(entries, "hit_2_plus"),
       home_run: summarizeMarketFeedback(entries, "home_run"),
     },
   };
 }
 
-export async function appendPrediction(result: AnalysisResult) {
+export async function appendPrediction(
+  result: AnalysisResult,
+  metadata: { odds?: PredictionOddsSnapshot | null } = {},
+) {
   const prediction: PredictionEntry = {
     analysisId: result.analysisId,
     playerId: result.hitter.player.id,
@@ -247,6 +272,8 @@ export async function appendPrediction(result: AnalysisResult) {
     modelVersion: result.modelVersion,
     generatedAt: result.generatedAt,
     savedAt: new Date().toISOString(),
+    odds: metadata.odds ?? null,
+    featureSnapshot: buildPredictionFeatureSnapshot(result),
   };
 
   await mkdir(DATA_DIRECTORY, { recursive: true });
@@ -274,6 +301,8 @@ export async function appendPredictions(results: AnalysisResult[]) {
           modelVersion: result.modelVersion,
           generatedAt: result.generatedAt,
           savedAt: new Date().toISOString(),
+          odds: null,
+          featureSnapshot: buildPredictionFeatureSnapshot(result),
         } satisfies PredictionEntry),
       )
       .join("\n")}\n`,
@@ -283,6 +312,11 @@ export async function appendPredictions(results: AnalysisResult[]) {
 
 export async function getSavedPredictions(): Promise<PredictionEntry[]> {
   return readPredictionEntries();
+}
+
+export async function getOutcomeFeedbackEntries(): Promise<OutcomeFeedbackEntry[]> {
+  const entries = await readNdjsonEntries(OUTCOME_FEEDBACK_PATH);
+  return entries.filter(isOutcomeFeedbackEntry);
 }
 
 export async function getPlayerPredictionHistory(
@@ -342,4 +376,86 @@ export async function appendOutcomeFeedback(entries: OutcomeFeedbackEntry[]) {
     `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
     "utf8",
   );
+}
+
+function csvEscape(value: unknown) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function outcomeTarget(entry: OutcomeFeedbackEntry) {
+  return entry.market === "home_run"
+    ? entry.actualHomeRuns > 0 ? 1 : 0
+    : entry.market === "hit_2_plus"
+      ? entry.actualHits >= 2 ? 1 : 0
+      : entry.actualHits > 0 ? 1 : 0;
+}
+
+export async function exportFeedbackToPlayerGameTrainingCsv(
+  outputPath = PLAYER_GAME_TRAINING_PATH,
+) {
+  const [predictions, outcomes] = await Promise.all([
+    readPredictionEntries(),
+    getOutcomeFeedbackEntries(),
+  ]);
+  const predictionById = new Map(
+    predictions.map((prediction) => [prediction.analysisId, prediction]),
+  );
+  const featureNames = getPredictionFeatureNames();
+  const header = [
+    "date",
+    "analysis_id",
+    "player_id",
+    "game_pk",
+    "market",
+    "predicted_probability",
+    "actual_result",
+    "has_hit",
+    "sportsbook_odds",
+    "sportsbook_implied_probability",
+    ...featureNames,
+  ];
+  const rows = outcomes
+    .map((outcome) => {
+      const prediction = predictionById.get(outcome.analysisId);
+
+      if (!prediction) {
+        return null;
+      }
+
+      const target = outcomeTarget(outcome);
+      const featureSnapshot = prediction.featureSnapshot ?? {};
+
+      return [
+        outcome.auditedAt.slice(0, 10),
+        outcome.analysisId,
+        outcome.playerId,
+        outcome.gamePk,
+        outcome.market,
+        prediction.probability,
+        target,
+        outcome.market === "hit" || outcome.market === "hit_2_plus" ? target : "",
+        prediction.odds?.normalizedOdds ?? "",
+        prediction.odds?.impliedProbability ?? "",
+        ...featureNames.map((feature) => featureSnapshot[feature] ?? ""),
+      ];
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  await writeFile(
+    outputPath,
+    `${[header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n")}\n`,
+    "utf8",
+  );
+
+  return {
+    path: outputPath,
+    rows: rows.length,
+    featureNames,
+  };
 }

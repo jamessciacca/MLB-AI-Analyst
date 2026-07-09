@@ -11,3 +11,4 @@ out
 .env.production.local
 
 coverage
+data/keepsakes/

@@ -79,7 +79,13 @@ function isFinalStatus(status: string) {
 }
 
 function outcomeSucceeded(market: AnalysisMarket, line: { hits: number; homeRuns: number }) {
-  return market === "home_run" ? line.homeRuns > 0 : line.hits > 0;
+  if (market === "home_run") {
+    return line.homeRuns > 0;
+  }
+  if (market === "hit_2_plus") {
+    return line.hits >= 2;
+  }
+  return line.hits > 0;
 }
 
 function predictedSuccess(entry: PredictionEntry) {
@@ -90,7 +96,13 @@ function predictedSuccess(entry: PredictionEntry) {
     return false;
   }
 
-  return entry.market === "home_run" ? entry.probability >= 0.15 : entry.probability >= 0.5;
+  if (entry.market === "home_run") {
+    return entry.probability >= 0.15;
+  }
+  if (entry.market === "hit_2_plus") {
+    return entry.probability >= 0.22;
+  }
+  return entry.probability >= 0.5;
 }
 
 function ratingFromOutcome(entry: PredictionEntry, success: boolean) {

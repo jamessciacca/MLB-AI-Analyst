@@ -4,7 +4,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getFeedbackCalibrationSummary } from "@/lib/feedback";
+import { getFeedbackCalibrationSummary, getSavedPredictions } from "@/lib/feedback";
 
 export const runtime = "nodejs";
 
@@ -12,7 +12,7 @@ const requestSchema = z.object({
   analysisId: z.string().min(1),
   playerId: z.coerce.number().int().positive(),
   gamePk: z.coerce.number().int().positive(),
-  market: z.enum(["hit", "home_run"]),
+  market: z.enum(["hit", "hit_2_plus", "home_run"]),
   probability: z.coerce.number().min(0).max(1),
   recommendation: z.enum(["good play", "neutral", "avoid"]),
   rating: z.enum(["correct", "too_high", "too_low"]),
@@ -103,10 +103,16 @@ export async function POST(request: Request) {
       };
     }
 
+    const savedPrediction = (await getSavedPredictions()).find(
+      (prediction) => prediction.analysisId === body.analysisId,
+    );
+
     await appendFile(
       target,
       `${JSON.stringify({
         ...body,
+        odds: savedPrediction?.odds ?? null,
+        featureSnapshot: savedPrediction?.featureSnapshot ?? null,
         proofImage: proofImageRecord,
         savedAt: new Date().toISOString(),
       })}\n`,

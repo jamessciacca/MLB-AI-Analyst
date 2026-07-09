@@ -1,15 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import modelConfig from "../../ml/model_config.json";
+import modelConfig from "../../ml/model_config.json" with { type: "json" };
 
 import {
   buildMlHitFeatureVector,
   getMlHitFeatureNames,
   type MlHitFeatureName,
-} from "@/lib/ml-hit-features";
-import { type AnalysisModelInput } from "@/lib/types";
-import { clamp } from "@/lib/utils";
+} from "./ml-hit-features.ts";
+import { type AnalysisModelInput } from "./types.ts";
+import { clamp } from "./utils.ts";
 
 type MlHitModelArtifact = {
   modelType: "regularized_logistic_regression";
@@ -36,6 +36,7 @@ export type MlHitPrediction = {
   probability2PlusHits: number;
   inferredPerAtBat: number;
   modelVersion: string;
+  usesGameContextFeatures: boolean;
   topContributors: Array<{
     feature: MlHitFeatureName;
     value: number;
@@ -79,10 +80,60 @@ function loadArtifact() {
   return cachedArtifact;
 }
 
-function validateArtifact(artifact: MlHitModelArtifact) {
-  const expected = getMlHitFeatureNames();
+function isFiniteRecordValue(record: Record<string, number>, key: string) {
+  return Number.isFinite(record[key]);
+}
 
-  return expected.every((feature) => artifact.featureNames.includes(feature));
+export function isUsableMlHitModelArtifact(artifact: MlHitModelArtifact) {
+  const expected = getMlHitFeatureNames();
+  const hasExpectedFeatures = expected.every((feature) => artifact.featureNames.includes(feature));
+  const hasModelSignal = expected.some(
+    (feature) => Math.abs(artifact.coefficients[feature] ?? 0) > 1e-9,
+  );
+  const hasValidStandardization = expected.every(
+    (feature) =>
+      isFiniteRecordValue(artifact.standardization.mean, feature) &&
+      isFiniteRecordValue(artifact.standardization.scale, feature) &&
+      artifact.standardization.scale[feature] !== 0,
+  );
+  const hasValidCalibration =
+    !artifact.calibration ||
+    (artifact.calibration.method === "platt" &&
+      Number.isFinite(artifact.calibration.intercept) &&
+      Number.isFinite(artifact.calibration.slope));
+
+  return (
+    hasExpectedFeatures &&
+    hasModelSignal &&
+    Number.isFinite(artifact.intercept) &&
+    hasValidStandardization &&
+    hasValidCalibration
+  );
+}
+
+const GAME_CONTEXT_FEATURE_NAMES: MlHitFeatureName[] = [
+  "hitter_team_win_probability",
+  "opponent_team_win_probability",
+  "win_probability_gap",
+  "hitter_team_is_favorite",
+  "hitter_team_is_underdog",
+  "hitter_team_implied_runs",
+  "opponent_team_implied_runs",
+  "game_total_runs",
+  "run_total_gap",
+  "hitter_team_share_of_total_runs",
+  "game_competitiveness_score",
+  "blowout_risk_score",
+  "offensive_suppression_risk",
+  "offensive_support_score",
+  "hit_context_boost",
+  "hit_context_penalty",
+  "expected_plate_appearance_environment",
+  "hitter_team_run_support_index",
+];
+
+function artifactUsesGameContextFeatures(artifact: MlHitModelArtifact) {
+  return GAME_CONTEXT_FEATURE_NAMES.some((feature) => artifact.featureNames.includes(feature));
 }
 
 /**
@@ -96,7 +147,7 @@ function validateArtifact(artifact: MlHitModelArtifact) {
 export function predictHitWithMl(input: AnalysisModelInput): MlHitPrediction | null {
   const artifact = loadArtifact();
 
-  if (!artifact || !validateArtifact(artifact)) {
+  if (!artifact || !isUsableMlHitModelArtifact(artifact)) {
     return null;
   }
 
@@ -132,6 +183,7 @@ export function predictHitWithMl(input: AnalysisModelInput): MlHitPrediction | n
     probability2PlusHits: probabilityAtLeastTwo(inferredPerAtBat, projectedAtBats),
     inferredPerAtBat,
     modelVersion: artifact.version,
+    usesGameContextFeatures: artifactUsesGameContextFeatures(artifact),
     topContributors: contributions
       .sort((left, right) => Math.abs(right.contribution) - Math.abs(left.contribution))
       .slice(0, 5),

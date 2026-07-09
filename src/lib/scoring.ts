@@ -8,9 +8,10 @@ import {
   type PitchMixEntry,
   type Recommendation,
   type StatcastEventRow,
-} from "@/lib/types";
-import { predictHitWithMl } from "@/lib/ml-hit-predictor";
-import { average, clamp, formatDecimal, formatPercent, minusDays } from "@/lib/utils";
+} from "./types.ts";
+import { predictHitWithMl } from "./ml-hit-predictor.ts";
+import { calibrateHitProbability } from "./hit-probability-calibration.ts";
+import { average, clamp, formatDecimal, formatPercent, minusDays } from "./utils.ts";
 
 const LEAGUE_HIT_RATE = 0.245;
 const LEAGUE_HOME_RUN_RATE = 0.033;
@@ -22,7 +23,7 @@ const LEAGUE_STRIKEOUT_RATE = 0.22;
 const LEAGUE_TEAM_OBP = 0.318;
 
 const HIT_PROBABILITY_MODEL_CONFIG = {
-  version: "v2.0.0",
+  version: "v2.1.0",
   leagueHitRate: LEAGUE_HIT_RATE,
   minPerOpportunity: 0.1,
   maxPerOpportunity: 0.45,
@@ -88,7 +89,17 @@ const NON_AT_BAT_EVENTS = new Set([
 ]);
 
 function getMarketLabel(market: AnalysisMarket): string {
-  return market === "home_run" ? "Home Run" : "Hit";
+  if (market === "home_run") {
+    return "Home Run";
+  }
+  if (market === "hit_2_plus") {
+    return "2+ Hits";
+  }
+  return "Hit";
+}
+
+function isHitMarket(market: AnalysisMarket) {
+  return market === "hit" || market === "hit_2_plus";
 }
 
 function finalPlateAppearanceRows(rows: StatcastEventRow[]): StatcastEventRow[] {
@@ -297,7 +308,7 @@ function computeParkAdjustment(
     return 0;
   }
 
-  if (market === "hit") {
+  if (isHitMarket(market)) {
     const averageDistance =
       average([
         venue.dimensions.leftLine,
@@ -341,7 +352,7 @@ function computeWeatherAdjustment(
   const precipitationProbability = input.precipitationProbability ?? 0;
   const wind = input.windSpeedMph ?? 0;
 
-  if (market === "hit") {
+  if (isHitMarket(market)) {
     const tempEffect = clamp(((temperature - 70) / 25) * 0.01, -0.012, 0.012);
     const precipEffect =
       precipitationProbability > 25
@@ -400,6 +411,16 @@ function recommendationForProbability(
       return "good play";
     }
     if (probability >= 0.5) {
+      return "neutral";
+    }
+    return "avoid";
+  }
+
+  if (market === "hit_2_plus") {
+    if (probability >= 0.34) {
+      return "good play";
+    }
+    if (probability >= 0.22) {
       return "neutral";
     }
     return "avoid";
@@ -489,11 +510,14 @@ function poissonBinomialAtLeastTwo(probability: number, opportunities: number) {
 
 function estimateTeamObp(input: AnalysisModelInput) {
   const hitterObp = input.hitter.season?.obp ?? input.hitter.priorSeason?.obp;
+  const teamLift = input.hitGameContext?.enabled
+    ? clamp((input.hitGameContext.hitterTeamImpliedRuns - 4.3) * 0.006, -0.015, 0.015)
+    : 0;
 
   return shrinkRate(
     hitterObp,
     input.hitter.season?.plateAppearances ?? input.hitter.priorSeason?.plateAppearances,
-    LEAGUE_TEAM_OBP,
+    LEAGUE_TEAM_OBP + teamLift,
     220,
   );
 }
@@ -502,7 +526,23 @@ function getGameWinEdge(input: AnalysisModelInput) {
   return clamp((input.gameWinContext?.hitterTeamWinProbability ?? 0.5) - 0.5, -0.32, 0.32);
 }
 
+function usesHitGameContext(input: AnalysisModelInput, market: AnalysisMarket) {
+  return isHitMarket(market) && input.hitGameContext?.enabled;
+}
+
+function getHitGameContextDelta(input: AnalysisModelInput, market: AnalysisMarket) {
+  return usesHitGameContext(input, market) ? input.hitGameContext?.contextAdjustmentDelta ?? 0 : 0;
+}
+
 function getGameWinPerAtBatAdjustment(input: AnalysisModelInput, market: AnalysisMarket) {
+  if (usesHitGameContext(input, market)) {
+    return clamp(getHitGameContextDelta(input, market), -0.018, 0.014);
+  }
+
+  if (!isHitMarket(market)) {
+    return 0;
+  }
+
   const edge = getGameWinEdge(input);
   const confidenceWeight =
     input.gameWinContext?.confidence === "high"
@@ -511,10 +551,23 @@ function getGameWinPerAtBatAdjustment(input: AnalysisModelInput, market: Analysi
         ? 0.75
         : 0.5;
 
-  return clamp(edge * confidenceWeight * (market === "home_run" ? 0.035 : 0.055), -0.012, 0.014);
+  return clamp(edge * confidenceWeight * 0.055, -0.012, 0.014);
 }
 
-function getGameWinOpportunityAdjustment(input: AnalysisModelInput) {
+function getGameWinOpportunityAdjustment(input: AnalysisModelInput, market: AnalysisMarket) {
+  if (usesHitGameContext(input, market)) {
+    return clamp(
+      ((input.hitGameContext?.expectedPlateAppearanceEnvironment ?? 1) - 1) * 0.75 +
+        (input.hitGameContext?.hitterTeamRunSupportIndex ?? 0) * 0.08,
+      -0.14,
+      0.16,
+    );
+  }
+
+  if (!isHitMarket(market)) {
+    return 0;
+  }
+
   const edge = getGameWinEdge(input);
   const confidenceWeight =
     input.gameWinContext?.confidence === "high"
@@ -530,7 +583,22 @@ function adjustProbabilityForGameWin(
   probability: number,
   input: AnalysisModelInput,
   market: AnalysisMarket,
+  mlAlreadyUsesContext = false,
 ) {
+  if (usesHitGameContext(input, market)) {
+    const delta = getHitGameContextDelta(input, market);
+    const logit = Math.log(
+      clamp(probability, 0.001, 0.999) / (1 - clamp(probability, 0.001, 0.999)),
+    );
+    const strength = mlAlreadyUsesContext ? 0.35 : 1;
+
+    return clamp(1 / (1 + Math.exp(-(logit + delta * 6.5 * strength))), 0.001, 0.999);
+  }
+
+  if (!isHitMarket(market)) {
+    return probability;
+  }
+
   if (!input.gameWinContext) {
     return probability;
   }
@@ -543,12 +611,20 @@ function adjustProbabilityForGameWin(
         ? 0.75
         : 0.5;
   const logit = Math.log(clamp(probability, 0.001, 0.999) / (1 - clamp(probability, 0.001, 0.999)));
-  const adjustment = edge * confidenceWeight * (market === "home_run" ? 0.22 : 0.32);
+  const adjustment = edge * confidenceWeight * 0.32;
 
   return clamp(1 / (1 + Math.exp(-(logit + adjustment))), 0.001, 0.999);
 }
 
-function gameWinExpectedHitsMultiplier(input: AnalysisModelInput) {
+function gameWinExpectedHitsMultiplier(input: AnalysisModelInput, market: AnalysisMarket) {
+  if (usesHitGameContext(input, market)) {
+    return clamp(input.hitGameContext?.expectedPlateAppearanceEnvironment ?? 1, 0.93, 1.08);
+  }
+
+  if (!isHitMarket(market)) {
+    return 1;
+  }
+
   if (!input.gameWinContext) {
     return 1;
   }
@@ -564,7 +640,10 @@ function gameWinExpectedHitsMultiplier(input: AnalysisModelInput) {
   return clamp(1 + edge * confidenceWeight * 0.18, 0.94, 1.07);
 }
 
-export function estimateProjectedOpportunities(input: AnalysisModelInput) {
+export function estimateProjectedOpportunities(
+  input: AnalysisModelInput,
+  market: AnalysisMarket = "hit",
+) {
   const config = HIT_PROBABILITY_MODEL_CONFIG;
   const seasonAtBatsPerGame =
     safeRate(input.hitter.season?.atBats, input.hitter.season?.gamesPlayed) ??
@@ -572,7 +651,14 @@ export function estimateProjectedOpportunities(input: AnalysisModelInput) {
     3.9;
   const lineupPlateAppearances =
     input.hitter.lineupSlot ? config.lineupPlateAppearances[input.hitter.lineupSlot] : null;
-  const teamObp = estimateTeamObp(input);
+  const teamObp = usesHitGameContext(input, market)
+    ? estimateTeamObp(input)
+    : shrinkRate(
+        input.hitter.season?.obp ?? input.hitter.priorSeason?.obp,
+        input.hitter.season?.plateAppearances ?? input.hitter.priorSeason?.plateAppearances,
+        LEAGUE_TEAM_OBP,
+        220,
+      );
   const teamContextAdjustment = clamp(
     (teamObp - LEAGUE_TEAM_OBP) * config.adjustmentScales.teamObp,
     -config.caps.opportunityTeam,
@@ -580,7 +666,7 @@ export function estimateProjectedOpportunities(input: AnalysisModelInput) {
   );
   const homeAdjustment =
     input.hitter.player.currentTeamId === input.game.homeTeam.id ? -0.06 : 0.04;
-  const gameWinOpportunityAdjustment = getGameWinOpportunityAdjustment(input);
+  const gameWinOpportunityAdjustment = getGameWinOpportunityAdjustment(input, market);
   const projectedPlateAppearances = clamp(
     (lineupPlateAppearances ?? seasonAtBatsPerGame + 0.55) +
       teamContextAdjustment +
@@ -924,7 +1010,7 @@ export function scoreOutcomeChance(
     | ReturnType<typeof estimateHitPerOpportunity>
     | null = null;
 
-  if (market === "hit") {
+  if (isHitMarket(market)) {
     hitModel = estimateHitPerOpportunity(
       input,
       batterForm,
@@ -989,8 +1075,12 @@ export function scoreOutcomeChance(
   const gameWinPerAtBatAdjustment = getGameWinPerAtBatAdjustment(input, market);
 
   const contextPerAtBat =
-    market === "hit" && hitModel
-      ? clamp(hitModel.perOpportunity + externalAdjustment, 0.02, 0.72)
+    isHitMarket(market) && hitModel
+      ? clamp(
+          hitModel.perOpportunity + externalAdjustment + gameWinPerAtBatAdjustment,
+          0.02,
+          0.72,
+        )
       : clamp(
           baseline +
             pitcherAdjustment +
@@ -1006,34 +1096,44 @@ export function scoreOutcomeChance(
           0.2,
         );
 
-  const opportunityProjection = estimateProjectedOpportunities(input);
-  const expectedAtBats =
-    market === "hit"
-      ? opportunityProjection.projectedAtBats
-      : opportunityProjection.projectedAtBats;
+  const opportunityProjection = estimateProjectedOpportunities(input, market);
+  const expectedAtBats = opportunityProjection.projectedAtBats;
 
-  const mlPrediction = market === "hit" ? predictHitWithMl(input) : null;
+  const mlPrediction = isHitMarket(market) ? predictHitWithMl(input) : null;
   const perAtBat = clamp(
-    (mlPrediction?.inferredPerAtBat ?? contextPerAtBat) + gameWinPerAtBatAdjustment,
+    (mlPrediction?.inferredPerAtBat ?? contextPerAtBat) +
+      (isHitMarket(market) && mlPrediction?.usesGameContextFeatures ? 0 : gameWinPerAtBatAdjustment),
     market === "home_run" ? 0.005 : 0.02,
     market === "home_run" ? 0.2 : 0.72,
   );
   const atLeastOne = 1 - (1 - perAtBat) ** expectedAtBats;
-  const finalAtLeastOne = adjustProbabilityForGameWin(
-    mlPrediction?.probability1PlusHit ?? atLeastOne,
+  const preContextHitProbability = mlPrediction?.probability1PlusHit ?? atLeastOne;
+  const finalAtLeastOneHitUncalibrated = adjustProbabilityForGameWin(
+    preContextHitProbability,
     input,
     market,
+    mlPrediction?.usesGameContextFeatures ?? false,
   );
-  const expectedHits =
+  const hitProbabilityCalibration =
     market === "hit"
+      ? calibrateHitProbability(finalAtLeastOneHitUncalibrated)
+      : null;
+  const finalAtLeastOneHit =
+    hitProbabilityCalibration?.applied
+      ? hitProbabilityCalibration.probability
+      : finalAtLeastOneHitUncalibrated;
+  const expectedHits =
+    isHitMarket(market)
       ? (mlPrediction?.expectedHits ?? expectedAtBats * perAtBat) *
-        gameWinExpectedHitsMultiplier(input)
+        gameWinExpectedHitsMultiplier(input, market)
       : null;
   const atLeastTwo =
-    market === "hit"
+    isHitMarket(market)
       ? mlPrediction?.probability2PlusHits ?? poissonBinomialAtLeastTwo(perAtBat, expectedAtBats)
       : null;
-  const recommendation = recommendationForProbability(finalAtLeastOne, market);
+  const primaryProbability =
+    market === "hit_2_plus" && atLeastTwo !== null ? atLeastTwo : finalAtLeastOneHit;
+  const recommendation = recommendationForProbability(primaryProbability, market);
 
   const diagnostics: AnalysisDiagnostics = {
     hitterSampleSize: batterForm.sampleSize,
@@ -1078,7 +1178,7 @@ export function scoreOutcomeChance(
       )}`,
       impact: impactLabel(hitModel?.platoonAdjustment ?? 0),
       detail:
-        market === "hit"
+        isHitMarket(market)
           ? input.pitcher.player?.pitchHand
             ? `Batter results against ${input.pitcher.player.pitchHand}-handed pitching were shrunk toward the hitter baseline before adjusting the projection.`
             : "No probable pitcher handedness was available, so platoon stayed neutral."
@@ -1126,10 +1226,10 @@ export function scoreOutcomeChance(
     },
     {
       label: market === "home_run" ? "Defense impact" : "Bullpen/defense proxy",
-      value: `${(market === "hit" ? bullpenAdjustment : defenseAdjustment) >= 0 ? "+" : ""}${formatDecimal(
-        market === "hit" ? bullpenAdjustment : defenseAdjustment,
+      value: `${(isHitMarket(market) ? bullpenAdjustment : defenseAdjustment) >= 0 ? "+" : ""}${formatDecimal(
+        isHitMarket(market) ? bullpenAdjustment : defenseAdjustment,
       )}`,
-      impact: impactLabel(market === "hit" ? bullpenAdjustment : defenseAdjustment),
+      impact: impactLabel(isHitMarket(market) ? bullpenAdjustment : defenseAdjustment),
       detail:
         market === "home_run"
           ? "Defense matters much less once the ball clears the wall, so this factor stays close to neutral."
@@ -1178,7 +1278,52 @@ export function scoreOutcomeChance(
     },
   ];
 
-  if (input.gameWinContext) {
+  if (isHitMarket(market) && input.hitGameContext) {
+    const delta = input.hitGameContext.contextAdjustmentDelta;
+
+    factors.push({
+      label: "Game script context",
+      value: `${delta >= 0 ? "+" : ""}${formatDecimal(delta)}`,
+      impact: impactLabel(delta),
+      detail:
+        delta > 0.004
+          ? `Small boost from strong team run environment, ${formatPercent(
+              input.hitGameContext.hitterTeamWinProbability,
+            )} team-win context, and a ${formatDecimal(
+              input.hitGameContext.gameCompetitivenessScore,
+              2,
+            )} competitiveness score.`
+          : delta < -0.004
+            ? `Slight penalty from underdog status, ${formatDecimal(
+                input.hitGameContext.hitterTeamImpliedRuns,
+                2,
+              )} projected team runs, and ${formatDecimal(
+                input.hitGameContext.blowoutRiskScore,
+                2,
+              )} blowout risk.`
+            : "Context is close to neutral here, so batter and pitcher skill matter more than the overall game shape.",
+    });
+    factors.push({
+      label: "Offensive support",
+      value: `${formatDecimal(input.hitGameContext.hitterTeamImpliedRuns, 2)} team runs`,
+      impact: impactLabel(
+        input.hitGameContext.offensiveSupportScore -
+          input.hitGameContext.offensiveSuppressionRisk,
+      ),
+      detail: `Expected team share of total runs ${formatPercent(
+        input.hitGameContext.hitterTeamShareOfTotalRuns,
+      )}, support score ${formatDecimal(
+        input.hitGameContext.offensiveSupportScore,
+        2,
+      )}, suppression risk ${formatDecimal(
+        input.hitGameContext.offensiveSuppressionRisk,
+        2,
+      )}, and plate-appearance environment ${formatDecimal(
+        input.hitGameContext.expectedPlateAppearanceEnvironment,
+        2,
+      )}.`,
+    });
+  } else if (isHitMarket(market) && input.gameWinContext) {
     const edge = getGameWinEdge(input);
 
     factors.push({
@@ -1204,6 +1349,18 @@ export function scoreOutcomeChance(
     });
   }
 
+  if (hitProbabilityCalibration?.applied) {
+    const calibrationDelta =
+      hitProbabilityCalibration.probability - finalAtLeastOneHitUncalibrated;
+
+    factors.push({
+      label: "Outcome calibration",
+      value: `${calibrationDelta >= 0 ? "+" : ""}${formatDecimal(calibrationDelta)}`,
+      impact: impactLabel(calibrationDelta),
+      detail: `Resolved prediction history recalibrated the 1+ hit probability using ${hitProbabilityCalibration.trainingRows} training rows and ${hitProbabilityCalibration.validationRows} validation rows.`,
+    });
+  }
+
   if (mlPrediction) {
     factors.unshift({
       label: "ML model",
@@ -1223,8 +1380,8 @@ export function scoreOutcomeChance(
 
   const notes: string[] = [];
 
-  if (!mlPrediction && market === "hit") {
-    notes.push("No trained ML artifact was found, so the app used the context-aware fallback model.");
+  if (!mlPrediction && isHitMarket(market)) {
+    notes.push("No usable trained ML artifact was found, so the app used the context-aware fallback model.");
   }
 
   if (!input.pitcher.probable) {
@@ -1255,13 +1412,26 @@ export function scoreOutcomeChance(
   if (input.hitter.recentGames.length > 0) {
     notes.push("Last-5 game-log form was included as a short-term adjustment.");
   }
-  if (input.gameWinContext) {
+  if (isHitMarket(market) && input.hitGameContext) {
+    notes.push(
+      `Game-shape context used ${input.hitGameContext.source} win probabilities, ${formatDecimal(
+        input.hitGameContext.hitterTeamImpliedRuns,
+        2,
+      )} projected team runs, and a ${formatDecimal(
+        input.hitGameContext.gameCompetitivenessScore,
+        2,
+      )} competitiveness score.`,
+    );
+  } else if (isHitMarket(market) && input.gameWinContext) {
     notes.push(
       `The ${input.gameWinContext.modelVersion} game winner projection was used as a small team-context adjustment.`,
     );
   }
   if (feedbackCalibration !== 0) {
     notes.push("Saved feedback has started calibrating this market.");
+  }
+  if (hitProbabilityCalibration?.applied) {
+    notes.push("Resolved outcome history calibrated the final 1+ hit probability.");
   }
 
   return {
@@ -1272,7 +1442,7 @@ export function scoreOutcomeChance(
     confidence,
     probabilities: {
       perAtBat,
-      atLeastOne: finalAtLeastOne,
+      atLeastOne: primaryProbability,
       atLeastTwo,
       expectedHits,
       expectedAtBats,
@@ -1304,9 +1474,44 @@ export function scoreOutcomeChance(
     notes,
     diagnostics,
     batterVsPitcher: null,
+    hitGameContext: isHitMarket(market) ? input.hitGameContext ?? null : null,
+    debug:
+      isHitMarket(market)
+        ? {
+            hitGameContext: input.hitGameContext
+              ? {
+                  hitterTeamWinProbability: input.hitGameContext.hitterTeamWinProbability,
+                  hitterTeamImpliedRuns: input.hitGameContext.hitterTeamImpliedRuns,
+                  opponentTeamImpliedRuns: input.hitGameContext.opponentTeamImpliedRuns,
+                  gameTotalRuns: input.hitGameContext.gameTotalRuns,
+                  gameCompetitivenessScore: input.hitGameContext.gameCompetitivenessScore,
+                  blowoutRiskScore: input.hitGameContext.blowoutRiskScore,
+                  offensiveSupportScore: input.hitGameContext.offensiveSupportScore,
+                  offensiveSuppressionRisk: input.hitGameContext.offensiveSuppressionRisk,
+                  expectedPlateAppearanceEnvironment:
+                    input.hitGameContext.expectedPlateAppearanceEnvironment,
+                  hitterTeamRunSupportIndex: input.hitGameContext.hitterTeamRunSupportIndex,
+                  hitContextBoost: input.hitGameContext.hitContextBoost,
+                  hitContextPenalty: input.hitGameContext.hitContextPenalty,
+                  contextAdjustmentDelta: input.hitGameContext.contextAdjustmentDelta,
+                  preContextHitProbability,
+                  finalHitProbability: finalAtLeastOneHit,
+                  uncalibratedFinalHitProbability: finalAtLeastOneHitUncalibrated,
+                  mlArtifactUsedGameContextFeatures:
+                    mlPrediction?.usesGameContextFeatures ?? null,
+                }
+              : null,
+          }
+        : null,
     summary: `${input.hitter.player.fullName} projects for a ${formatPercent(
-      finalAtLeastOne,
-    )} chance of at least one ${market === "home_run" ? "home run" : "hit"}, built from a ${formatPercent(
+      primaryProbability,
+    )} chance of ${
+      market === "home_run"
+        ? "at least one home run"
+        : market === "hit_2_plus"
+          ? "2+ hits"
+          : "at least one hit"
+    }, built from a ${formatPercent(
       perAtBat,
     )} per-at-bat ${market === "home_run" ? "home-run" : "hit"} rate over roughly ${expectedAtBats.toFixed(
       1,
@@ -1315,6 +1520,8 @@ export function scoreOutcomeChance(
         ? `, ${expectedHits.toFixed(2)} expected hits, and a ${formatPercent(
             atLeastTwo,
           )} chance of 2+ hits`
+        : market === "hit_2_plus" && expectedHits !== null
+          ? ` and ${expectedHits.toFixed(2)} expected hits`
         : ""
     }.`,
   };

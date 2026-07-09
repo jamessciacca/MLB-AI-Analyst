@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 
 const requestSchema = z.object({
   gamePk: z.coerce.number().int().positive(),
-  market: z.enum(["hit", "home_run"]).default("hit"),
+  market: z.enum(["hit", "hit_2_plus", "home_run"]).default("hit"),
 });
 
 export async function POST(request: Request) {

@@ -28,7 +28,7 @@ export type ActualOutcome =
   | "loss"
   | "unknown";
 
-export type PredictionMarket = "hit" | "home_run" | "game_win" | "unknown";
+export type PredictionMarket = "hit" | "hit_2_plus" | "home_run" | "game_win" | "unknown";
 
 export type ChatSession = {
   id: string;

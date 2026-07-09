@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { isUsableMlHitModelArtifact } from "../src/lib/ml-hit-predictor.ts";
+import { getMlHitFeatureNames } from "../src/lib/ml-hit-features.ts";
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -68,4 +71,30 @@ test("expected hits are derived from inferred per-at-bat probability", () => {
   assert.ok(inferredPerAtBat > 0);
   assert.ok(expectedHits > 0);
   assert.ok(expectedHits < projectedAbs);
+});
+
+test("ML artifact validator rejects constant 50 percent models", () => {
+  const featureNames = getMlHitFeatureNames();
+  const zeroSignalArtifact = {
+    modelType: "regularized_logistic_regression",
+    version: "test",
+    trainedAt: "2026-04-25T00:00:00.000Z",
+    featureNames,
+    intercept: 0,
+    coefficients: Object.fromEntries(featureNames.map((feature) => [feature, 0])),
+    standardization: {
+      mean: Object.fromEntries(featureNames.map((feature) => [feature, 0])),
+      scale: Object.fromEntries(featureNames.map((feature) => [feature, 1])),
+    },
+  };
+  const usableArtifact = {
+    ...zeroSignalArtifact,
+    coefficients: {
+      ...zeroSignalArtifact.coefficients,
+      batter_avg: 0.4,
+    },
+  };
+
+  assert.equal(isUsableMlHitModelArtifact(zeroSignalArtifact), false);
+  assert.equal(isUsableMlHitModelArtifact(usableArtifact), true);
 });

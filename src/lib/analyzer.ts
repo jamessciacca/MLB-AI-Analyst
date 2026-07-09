@@ -13,7 +13,10 @@ import {
   getVenueById,
 } from "@/lib/mlb";
 import { buildExternalContext } from "@/lib/enrichment/external-context";
+import { buildAnalystPrediction } from "@/lib/analyst/engine";
+import { selectBestHitterForGame } from "@/lib/analyst/hitter-selection-service";
 import { buildGameWinPrediction } from "@/lib/game-win-analyzer";
+import { buildHitGameContextFeatures } from "@/lib/hit-game-context-features";
 import {
   getBatterExpectedStats,
   getBatterStatcastRows,
@@ -51,6 +54,20 @@ const NON_AT_BAT_EVENTS = new Set([
 ]);
 
 const gameWinPredictionCache = new Map<number, Promise<GameWinPredictionResult>>();
+
+function isHitMarket(market: AnalysisMarket) {
+  return market === "hit" || market === "hit_2_plus";
+}
+
+function marketLabel(market: AnalysisMarket) {
+  if (market === "home_run") {
+    return "Home Run";
+  }
+  if (market === "hit_2_plus") {
+    return "2+ Hits";
+  }
+  return "Hit";
+}
 
 async function getCachedGameWinPrediction(gamePk: number) {
   const cached = gameWinPredictionCache.get(gamePk);
@@ -160,7 +177,13 @@ function summarizeBatterVsPitcher(
 }
 
 function outcomeSucceeded(market: AnalysisMarket, line: { hits: number; homeRuns: number }) {
-  return market === "home_run" ? line.homeRuns > 0 : line.hits > 0;
+  if (market === "home_run") {
+    return line.homeRuns > 0;
+  }
+  if (market === "hit_2_plus") {
+    return line.hits >= 2;
+  }
+  return line.hits > 0;
 }
 
 function predictedSuccess(result: AnalysisResult) {
@@ -171,9 +194,13 @@ function predictedSuccess(result: AnalysisResult) {
     return false;
   }
 
-  return result.market === "home_run"
-    ? result.probabilities.atLeastOne >= 0.15
-    : result.probabilities.atLeastOne >= 0.5;
+  if (result.market === "home_run") {
+    return result.probabilities.atLeastOne >= 0.15;
+  }
+  if (result.market === "hit_2_plus") {
+    return result.probabilities.atLeastOne >= 0.22;
+  }
+  return result.probabilities.atLeastOne >= 0.5;
 }
 
 function ratingFromPreviousResult(result: AnalysisResult, success: boolean) {
@@ -296,6 +323,15 @@ export async function buildAnalysis(
   const weather = (await getGameWeather(venue, game.gameDate)) ?? weatherFromExternal(externalContext);
   const feedbackCalibration = await getFeedbackCalibration(market);
   const gameWinPrediction = await getCachedGameWinPrediction(gamePk).catch(() => null);
+  const hitGameContext =
+    isHitMarket(market)
+      ? buildHitGameContextFeatures({
+          game,
+          hitterTeamId: hitter.currentTeamId ?? 0,
+          gameWinPrediction,
+          externalContext,
+        })
+      : null;
   const batterVsPitcherRows =
     pitcher && probablePitcherInfo
       ? await getBatterVsPitcherRows(
@@ -355,6 +391,7 @@ export async function buildAnalysis(
     defense,
     externalContext,
     gameWinContext: buildPlayerGameWinContext(gameWinPrediction, hitter.currentTeamId),
+    hitGameContext,
   };
 
   const scored = scoreOutcomeChance(modelInput, market, feedbackCalibration.adjustment);
@@ -376,14 +413,14 @@ export async function buildPreviousModelResult(
 ): Promise<PreviousModelResult> {
   const referenceGame = await getGameByPk(referenceGamePk);
   const previousDate = minusDays(referenceGame?.officialDate ?? new Date().toISOString(), 1);
-  const marketLabel = market === "home_run" ? "Home Run" : "Hit";
+  const label = marketLabel(market);
   const player = await getPlayerById(playerId);
 
   if (!player) {
     return {
       date: previousDate,
       market,
-      marketLabel,
+      marketLabel: label,
       game: null,
       probability: null,
       recommendation: null,
@@ -407,7 +444,7 @@ export async function buildPreviousModelResult(
     return {
       date: previousDate,
       market,
-      marketLabel,
+      marketLabel: label,
       game: null,
       probability: null,
       recommendation: null,
@@ -430,7 +467,7 @@ export async function buildPreviousModelResult(
     return {
       date: previousDate,
       market,
-      marketLabel,
+      marketLabel: label,
       game: previousGame,
       probability: previousAnalysis.probabilities.atLeastOne,
       recommendation: previousAnalysis.recommendation,
@@ -449,7 +486,7 @@ export async function buildPreviousModelResult(
   return {
     date: previousDate,
     market,
-    marketLabel,
+    marketLabel: label,
     game: previousGame,
     probability: previousAnalysis.probabilities.atLeastOne,
     recommendation: previousAnalysis.recommendation,
@@ -512,19 +549,87 @@ export async function buildLineupComparison(
     );
   }
 
-  players.sort(
-    (left, right) =>
-      right.probabilities.atLeastOne - left.probabilities.atLeastOne ||
-      left.hitter.player.fullName.localeCompare(right.hitter.player.fullName),
-  );
+  let selection = null;
+
+  if (isHitMarket(market) && players.length > 0) {
+    const analystPredictions = await Promise.all(
+      players.map((player) =>
+        buildAnalystPrediction({
+          playerId: player.hitter.player.id,
+          gamePk,
+          market,
+          analysis: player,
+        }).catch(() => null),
+      ),
+    );
+    const selectionInputs = players.flatMap((player, index) => {
+      const analyst = analystPredictions[index];
+
+      if (!analyst) {
+        return [];
+      }
+
+      return [
+        {
+          analysis: player,
+          analyst,
+        },
+      ];
+    });
+
+    selection = selectBestHitterForGame({
+      market,
+      players: selectionInputs,
+    });
+
+    if (selection) {
+      const rankOrder = new Map(
+        selection.comparisonTable.map((entry, index) => [entry.playerId, index] as const),
+      );
+
+      players.sort((left, right) => {
+        const leftRank = rankOrder.get(left.hitter.player.id);
+        const rightRank = rankOrder.get(right.hitter.player.id);
+
+        if (leftRank !== undefined && rightRank !== undefined) {
+          return leftRank - rightRank;
+        }
+        if (leftRank !== undefined) {
+          return -1;
+        }
+        if (rightRank !== undefined) {
+          return 1;
+        }
+
+        return (
+          right.probabilities.atLeastOne - left.probabilities.atLeastOne ||
+          left.hitter.player.fullName.localeCompare(right.hitter.player.fullName)
+        );
+      });
+    }
+  }
+
+  if (!selection) {
+    players.sort(
+      (left, right) =>
+        right.probabilities.atLeastOne - left.probabilities.atLeastOne ||
+        left.hitter.player.fullName.localeCompare(right.hitter.player.fullName),
+    );
+  }
+
+  const selectedTopPick =
+    selection
+      ? players.find((player) => player.hitter.player.id === selection?.selectedPlayerId) ?? null
+      : players[0] ?? null;
 
   return {
     generatedAt: new Date().toISOString(),
     market,
-    marketLabel: market === "home_run" ? "Home Run" : "Hit",
+    marketLabel: marketLabel(market),
     game,
-    topPick: players[0] ?? null,
+    topPick: selectedTopPick,
     players,
+    selection,
     skippedPlayers,
   };
 }

@@ -19,6 +19,7 @@ CONFIG = json.loads(CONFIG_PATH.read_text())
 FEATURE_NAMES: list[str] = CONFIG["featureNames"]
 DEFAULTS: dict[str, float] = CONFIG["defaults"]
 TARGET = CONFIG["target"]
+SOURCE_PROBABILITY = "predicted_probability"
 
 LEAKAGE_COLUMN_HINTS = {
     "game_hits",
@@ -71,7 +72,16 @@ def prepare_training_frame(path: str | Path) -> pd.DataFrame:
         frame[feature] = pd.to_numeric(frame[feature], errors="coerce").fillna(DEFAULTS[feature])
 
     frame[TARGET] = pd.to_numeric(frame[TARGET], errors="coerce").fillna(0).clip(0, 1).astype(int)
-    return frame[["date", TARGET, *FEATURE_NAMES]]
+    selected_columns = ["date", TARGET, *FEATURE_NAMES]
+
+    if SOURCE_PROBABILITY in frame.columns:
+        frame[SOURCE_PROBABILITY] = (
+            pd.to_numeric(frame[SOURCE_PROBABILITY], errors="coerce")
+            .clip(0.001, 0.999)
+        )
+        selected_columns.append(SOURCE_PROBABILITY)
+
+    return frame[selected_columns]
 
 
 def split_time_ordered(frame: pd.DataFrame, validation_fraction: float = 0.2):
